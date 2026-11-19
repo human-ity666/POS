@@ -1,0 +1,6 @@
+{
+  "name": "KassaRitel POS",
+  "description": "Aplikasi kasir Point of Sale toko ritel dengan pemindai barcode kamera langsung dan laporan stok otomatis.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

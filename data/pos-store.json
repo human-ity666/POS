@@ -1,0 +1,311 @@
+{
+  "products": [
+    {
+      "id": "prd-01",
+      "barcode": "8998866200315",
+      "name": "Indomie Goreng Spesial 85g",
+      "category": "Sembako",
+      "unit": "bungkus",
+      "costPrice": 2700,
+      "sellPrice": 3500,
+      "stock": 68,
+      "minStock": 20,
+      "updatedAt": "2026-11-19T00:38:36.062Z"
+    },
+    {
+      "id": "prd-02",
+      "barcode": "8992761139018",
+      "name": "Aqua Air Mineral 600ml",
+      "category": "Minuman",
+      "unit": "botol",
+      "costPrice": 2800,
+      "sellPrice": 4000,
+      "stock": 46,
+      "minStock": 15,
+      "updatedAt": "2026-11-19T00:58:36.062Z"
+    },
+    {
+      "id": "prd-03",
+      "barcode": "8996001301180",
+      "name": "Teh Botol Sosro Kotak 250ml",
+      "category": "Minuman",
+      "unit": "kotak",
+      "costPrice": 3100,
+      "sellPrice": 4500,
+      "stock": 11,
+      "minStock": 15,
+      "updatedAt": "2026-11-19T02:08:36.062Z"
+    },
+    {
+      "id": "prd-04",
+      "barcode": "8991002101128",
+      "name": "Kopi Kapal Api Special 165g",
+      "category": "Minuman",
+      "unit": "bungkus",
+      "costPrice": 13500,
+      "sellPrice": 16500,
+      "stock": 19,
+      "minStock": 8,
+      "updatedAt": "2026-11-19T01:18:36.062Z"
+    },
+    {
+      "id": "prd-05",
+      "barcode": "8992753101207",
+      "name": "Susu Ultra Milk Cokelat 250ml",
+      "category": "Minuman",
+      "unit": "kotak",
+      "costPrice": 5400,
+      "sellPrice": 7000,
+      "stock": 6,
+      "minStock": 12,
+      "updatedAt": "2026-11-19T02:53:36.062Z"
+    },
+    {
+      "id": "prd-06",
+      "barcode": "8993175534824",
+      "name": "Beras Premium Pandan Wangi 5kg",
+      "category": "Sembako",
+      "unit": "sak",
+      "costPrice": 67000,
+      "sellPrice": 76000,
+      "stock": 14,
+      "minStock": 5,
+      "updatedAt": "2026-11-19T00:18:36.062Z"
+    },
+    {
+      "id": "prd-07",
+      "barcode": "8992775210116",
+      "name": "Minyak Goreng Bimoli Pouch 1L",
+      "category": "Sembako",
+      "unit": "pouch",
+      "costPrice": 16500,
+      "sellPrice": 19500,
+      "stock": 4,
+      "minStock": 10,
+      "updatedAt": "2026-11-19T03:08:36.062Z"
+    },
+    {
+      "id": "prd-08",
+      "barcode": "8992388111014",
+      "name": "Chitato Sapi Panggang 68g",
+      "category": "Makanan Ringan",
+      "unit": "bungkus",
+      "costPrice": 9200,
+      "sellPrice": 12000,
+      "stock": 25,
+      "minStock": 10,
+      "updatedAt": "2026-11-19T01:38:36.062Z"
+    },
+    {
+      "id": "prd-09",
+      "barcode": "8996001600269",
+      "name": "Roma Biskuit Kelapa 300g",
+      "category": "Makanan Ringan",
+      "unit": "bungkus",
+      "costPrice": 8800,
+      "sellPrice": 11500,
+      "stock": 17,
+      "minStock": 8,
+      "updatedAt": "2026-11-19T01:48:36.062Z"
+    },
+    {
+      "id": "prd-10",
+      "barcode": "8999999002466",
+      "name": "Pepsodent Pasta Gigi Herbal 190g",
+      "category": "Perawatan Diri",
+      "unit": "tube",
+      "costPrice": 11500,
+      "sellPrice": 15000,
+      "stock": 22,
+      "minStock": 8,
+      "updatedAt": "2026-11-19T00:08:36.062Z"
+    },
+    {
+      "id": "prd-11",
+      "barcode": "8999999513016",
+      "name": "Lifebuoy Sabun Cair Total 450ml",
+      "category": "Perawatan Diri",
+      "unit": "pouch",
+      "costPrice": 19000,
+      "sellPrice": 24500,
+      "stock": 0,
+      "minStock": 6,
+      "updatedAt": "2026-11-19T03:13:36.062Z"
+    },
+    {
+      "id": "prd-12",
+      "barcode": "8999999036614",
+      "name": "Sunlight Jeruk Nipis Refill 650ml",
+      "category": "Rumah Tangga",
+      "unit": "pouch",
+      "costPrice": 12800,
+      "sellPrice": 16000,
+      "stock": 15,
+      "minStock": 6,
+      "updatedAt": "2026-11-19T01:08:36.062Z"
+    }
+  ],
+  "transactions": [
+    {
+      "id": "trx-seed-02",
+      "invoiceNumber": "TRX-20261118-002",
+      "items": [
+        {
+          "productId": "prd-05",
+          "barcode": "8992753101207",
+          "name": "Susu Ultra Milk Cokelat 250ml",
+          "unit": "kotak",
+          "qty": 3,
+          "sellPrice": 7000,
+          "costPrice": 5400,
+          "subtotal": 21000
+        },
+        {
+          "productId": "prd-08",
+          "barcode": "8992388111014",
+          "name": "Chitato Sapi Panggang 68g",
+          "unit": "bungkus",
+          "qty": 2,
+          "sellPrice": 12000,
+          "costPrice": 9200,
+          "subtotal": 24000
+        }
+      ],
+      "subtotal": 45000,
+      "discountAmount": 0,
+      "taxAmount": 0,
+      "total": 45000,
+      "cashReceived": 45000,
+      "changeAmount": 0,
+      "paymentMethod": "QRIS",
+      "totalCost": 34600,
+      "grossProfit": 10400,
+      "cashierName": "Kasir Utama",
+      "createdAt": "2026-11-19T02:53:36.062Z"
+    },
+    {
+      "id": "trx-seed-01",
+      "invoiceNumber": "TRX-20261118-001",
+      "items": [
+        {
+          "productId": "prd-01",
+          "barcode": "8998866200315",
+          "name": "Indomie Goreng Spesial 85g",
+          "unit": "bungkus",
+          "qty": 4,
+          "sellPrice": 3500,
+          "costPrice": 2700,
+          "subtotal": 14000
+        },
+        {
+          "productId": "prd-02",
+          "barcode": "8992761139018",
+          "name": "Aqua Air Mineral 600ml",
+          "unit": "botol",
+          "qty": 2,
+          "sellPrice": 4000,
+          "costPrice": 2800,
+          "subtotal": 8000
+        },
+        {
+          "productId": "prd-07",
+          "barcode": "8992775210116",
+          "name": "Minyak Goreng Bimoli Pouch 1L",
+          "unit": "pouch",
+          "qty": 1,
+          "sellPrice": 19500,
+          "costPrice": 16500,
+          "subtotal": 19500
+        }
+      ],
+      "subtotal": 41500,
+      "discountAmount": 0,
+      "taxAmount": 0,
+      "total": 41500,
+      "cashReceived": 50000,
+      "changeAmount": 8500,
+      "paymentMethod": "Tunai",
+      "totalCost": 32900,
+      "grossProfit": 8600,
+      "cashierName": "Kasir Utama",
+      "createdAt": "2026-11-19T02:03:36.062Z"
+    }
+  ],
+  "stockMovements": [
+    {
+      "id": "mov-seed-05",
+      "productId": "prd-11",
+      "productName": "Lifebuoy Sabun Cair Total 450ml",
+      "barcode": "8999999513016",
+      "type": "PENJUALAN",
+      "qtyDelta": -2,
+      "stockBefore": 2,
+      "stockAfter": 0,
+      "referenceId": "TRX-20261118-000",
+      "notes": "Penjualan kasir — stok habis otomatis tercatat",
+      "createdAt": "2026-11-19T03:13:36.062Z"
+    },
+    {
+      "id": "mov-seed-04",
+      "productId": "prd-05",
+      "productName": "Susu Ultra Milk Cokelat 250ml",
+      "barcode": "8992753101207",
+      "type": "PENJUALAN",
+      "qtyDelta": -3,
+      "stockBefore": 9,
+      "stockAfter": 6,
+      "referenceId": "TRX-20261118-002",
+      "notes": "Penjualan via QRIS",
+      "createdAt": "2026-11-19T02:53:36.062Z"
+    },
+    {
+      "id": "mov-seed-03",
+      "productId": "prd-08",
+      "productName": "Chitato Sapi Panggang 68g",
+      "barcode": "8992388111014",
+      "type": "PENJUALAN",
+      "qtyDelta": -2,
+      "stockBefore": 27,
+      "stockAfter": 25,
+      "referenceId": "TRX-20261118-002",
+      "notes": "Penjualan via QRIS",
+      "createdAt": "2026-11-19T02:53:36.062Z"
+    },
+    {
+      "id": "mov-seed-02",
+      "productId": "prd-07",
+      "productName": "Minyak Goreng Bimoli Pouch 1L",
+      "barcode": "8992775210116",
+      "type": "PENJUALAN",
+      "qtyDelta": -1,
+      "stockBefore": 5,
+      "stockAfter": 4,
+      "referenceId": "TRX-20261118-001",
+      "notes": "Penjualan tunai kasir",
+      "createdAt": "2026-11-19T02:03:36.062Z"
+    },
+    {
+      "id": "mov-seed-01",
+      "productId": "prd-01",
+      "productName": "Indomie Goreng Spesial 85g",
+      "barcode": "8998866200315",
+      "type": "RESTOK",
+      "qtyDelta": 40,
+      "stockBefore": 28,
+      "stockAfter": 68,
+      "referenceId": "PO-20261118-01",
+      "notes": "Restok supplier mingguan",
+      "createdAt": "2026-11-19T00:38:36.062Z"
+    }
+  ],
+  "settings": {
+    "storeName": "Toko Serba Ada KassaRitel",
+    "storeAddress": "Jl. Jenderal Sudirman No. 48, Jakarta",
+    "storePhone": "021-5550-1928",
+    "receiptFooter": "Terima kasih telah berbelanja. Barang yang sudah dibeli tidak dapat ditukar kecuali ada perjanjian.",
+    "taxEnabled": false,
+    "taxRate": 11,
+    "cashierName": "Kasir Utama"
+  },
+  "auditLogs": []
+}
