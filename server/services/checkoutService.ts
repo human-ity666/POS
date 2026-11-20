@@ -11,9 +11,17 @@ import {
 import { recordAuditLog } from './auditService.ts';
 import { consumePinApprovalToken } from './authService.ts';
 import { queryEnrichedProducts } from './catalogService.ts';
+import {
+  applyLoyaltyForCompletedTransactionTx,
+  createCustomerProfile,
+  getLoyaltySettings,
+  listCustomersWithMetrics,
+} from './customerService.ts';
 import { ServiceError } from './errors.ts';
+import { evaluatePromotionsForCart, type EvaluableCartLine } from './promotionService.ts';
 import { captureReceiptSnapshotTx } from './receiptService.ts';
 import type {
+  AppliedPromotionSummary,
   Customer,
   PaymentMethodConfig,
   PaymentMethodType,
@@ -37,104 +45,23 @@ const VALID_PAYMENT_TYPES: ReadonlySet<PaymentMethodType> = new Set([
 ]);
 
 // --- Customers ---
-export function listCustomers(search?: string): Customer[] {
-  const db = getDb();
-  const rows = db
-    .prepare(`
-      SELECT id, code, name, phone, email, address, notes, is_active, created_at, updated_at
-      FROM customers
-      ORDER BY name ASC
-    `)
-    .all() as Array<{
-    id: string;
-    code: string;
-    name: string;
-    phone: string;
-    email: string;
-    address: string;
-    notes: string;
-    is_active: number;
-    created_at: string;
-    updated_at: string;
-  }>;
-
-  let list: Customer[] = rows.map((r) => ({
-    id: r.id,
-    code: r.code,
-    name: r.name,
-    phone: r.phone,
-    email: r.email,
-    address: r.address,
-    notes: r.notes,
-    isActive: r.is_active === 1,
-    createdAt: r.created_at,
-    updatedAt: r.updated_at,
-  }));
-
-  const q = (search ?? '').trim().toLowerCase();
-  if (q) {
-    list = list.filter(
-      (c) =>
-        c.name.toLowerCase().includes(q) ||
-        c.code.toLowerCase().includes(q) ||
-        c.phone.toLowerCase().includes(q) ||
-        c.email.toLowerCase().includes(q)
-    );
-  }
-  return list;
+export function listCustomers(search?: string, status?: string): Customer[] {
+  return listCustomersWithMetrics({ search, status });
 }
 
 export function createCustomer(
-  input: { name?: unknown; phone?: unknown; email?: unknown; address?: unknown; notes?: unknown },
+  input: {
+    name?: unknown;
+    phone?: unknown;
+    email?: unknown;
+    address?: unknown;
+    notes?: unknown;
+    membershipNumber?: unknown;
+    isActive?: unknown;
+  },
   actor: UserSummary
 ): Customer {
-  const name = typeof input.name === 'string' ? input.name.trim() : '';
-  if (!name || name.length < 2) {
-    throw new ServiceError(400, 'Nama pelanggan wajib diisi (minimal 2 karakter).');
-  }
-  const phone = typeof input.phone === 'string' ? input.phone.trim() : '';
-  const email = typeof input.email === 'string' ? input.email.trim() : '';
-  const address = typeof input.address === 'string' ? input.address.trim() : '';
-  const notes = typeof input.notes === 'string' ? input.notes.trim() : '';
-
-  const db = getDb();
-  const countRow = db.prepare('SELECT COUNT(*) as cnt FROM customers').get() as { cnt: number };
-  let seq = countRow.cnt + 1;
-  let code = '';
-  while (true) {
-    const cand = `CUST-${String(seq).padStart(4, '0')}`;
-    if (!db.prepare('SELECT 1 FROM customers WHERE code = ?').get(cand)) {
-      code = cand;
-      break;
-    }
-    seq++;
-  }
-
-  const id = `cust-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-  const nowIso = new Date().toISOString();
-
-  db.exec('BEGIN IMMEDIATE;');
-  try {
-    db.prepare(`
-      INSERT INTO customers (id, code, name, phone, email, address, notes, is_active, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-    `).run(id, code, name, phone, email, address, notes, nowIso, nowIso);
-
-    recordAuditLog(db, {
-      action: 'CUSTOMER_CREATED',
-      entityType: 'customer',
-      entityId: id,
-      actorUserId: actor.id,
-      actor: actor.fullName,
-      summary: `Tambah pelanggan "${name}" (${code})`,
-    });
-    db.exec('COMMIT;');
-  } catch (err) {
-    db.exec('ROLLBACK;');
-    throw err;
-  }
-
-  return listCustomers().find((c) => c.id === id)!;
+  return createCustomerProfile(input, actor);
 }
 
 // --- Configurable Payment Methods ---
@@ -320,6 +247,17 @@ function nextDocumentNumber(db: DatabaseSync, prefix: 'TRX' | 'HOLD'): string {
 }
 
 // --- Query Helpers ---
+function parseAppliedPromotionsJson(raw: string | null | undefined): AppliedPromotionSummary[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed as AppliedPromotionSummary[];
+  } catch {
+    // Ignore malformed JSON
+  }
+  return [];
+}
+
 function mapTransactionRows(
   trxRows: Array<{
     id: string;
@@ -333,6 +271,11 @@ function mapTransactionRows(
     transaction_discount_type: DiscountMode;
     transaction_discount_value: number;
     transaction_discount_amount: number;
+    promotion_discount_amount?: number;
+    loyalty_points_earned?: number;
+    loyalty_points_redeemed?: number;
+    loyalty_discount_amount?: number;
+    applied_promotions_json?: string;
     discount_amount: number;
     apply_tax: number;
     tax_amount: number;
@@ -359,6 +302,7 @@ function mapTransactionRows(
     SELECT product_id, sku, barcode, name, unit, qty,
            original_sell_price, sell_price, price_override, cost_price,
            line_discount_type, line_discount_value, line_discount_amount,
+           promotion_id, promotion_name, promotion_discount_amount,
            tax_category, tax_amount, subtotal
     FROM transaction_items
     WHERE transaction_id = ?
@@ -388,6 +332,9 @@ function mapTransactionRows(
       line_discount_type: DiscountMode;
       line_discount_value: number;
       line_discount_amount: number;
+      promotion_id?: string | null;
+      promotion_name?: string;
+      promotion_discount_amount?: number;
       tax_category: TaxCategory;
       tax_amount: number;
       subtotal: number;
@@ -419,6 +366,9 @@ function mapTransactionRows(
       lineDiscountType: i.line_discount_type,
       lineDiscountValue: i.line_discount_value,
       lineDiscountAmount: i.line_discount_amount,
+      promotionId: i.promotion_id ?? null,
+      promotionName: i.promotion_name || undefined,
+      promotionDiscountAmount: Number(i.promotion_discount_amount ?? 0),
       taxCategory: i.tax_category,
       taxAmount: i.tax_amount,
       subtotal: i.subtotal,
@@ -450,6 +400,11 @@ function mapTransactionRows(
       transactionDiscountType: t.transaction_discount_type,
       transactionDiscountValue: t.transaction_discount_value,
       transactionDiscountAmount: t.transaction_discount_amount,
+      promotionDiscountAmount: Number(t.promotion_discount_amount ?? 0),
+      loyaltyPointsEarned: Number(t.loyalty_points_earned ?? 0),
+      loyaltyPointsRedeemed: Number(t.loyalty_points_redeemed ?? 0),
+      loyaltyDiscountAmount: Number(t.loyalty_discount_amount ?? 0),
+      appliedPromotions: parseAppliedPromotionsJson(t.applied_promotions_json),
       discountAmount: t.discount_amount,
       applyTax: t.apply_tax === 1,
       taxAmount: t.tax_amount,
@@ -474,7 +429,9 @@ function mapTransactionRows(
 const TRANSACTION_SELECT_COLS = `
   id, invoice_number, status, payment_status, customer_id, customer_name,
   subtotal, line_discount_total, transaction_discount_type, transaction_discount_value,
-  transaction_discount_amount, discount_amount, apply_tax, tax_amount, total,
+  transaction_discount_amount, promotion_discount_amount, loyalty_points_earned,
+  loyalty_points_redeemed, loyalty_discount_amount, applied_promotions_json,
+  discount_amount, apply_tax, tax_amount, total,
   cash_received, change_amount, payment_method, total_cost, gross_profit,
   notes, cashier_id, cashier_name, held_at, cancelled_at, completed_at,
   created_at, updated_at
@@ -492,6 +449,20 @@ export function queryTransactions(limit = 200, includeAllStatuses = false): Tran
       LIMIT ?
     `)
     .all(limit) as Parameters<typeof mapTransactionRows>[0];
+  return mapTransactionRows(rows);
+}
+
+export function listCustomerTransactions(customerId: string, limit = 100): Transaction[] {
+  const db = getDb();
+  const rows = db
+    .prepare(`
+      SELECT ${TRANSACTION_SELECT_COLS}
+      FROM transactions
+      WHERE customer_id = ?
+      ORDER BY created_at DESC
+      LIMIT ?
+    `)
+    .all(customerId, limit) as Parameters<typeof mapTransactionRows>[0];
   return mapTransactionRows(rows);
 }
 
@@ -594,6 +565,9 @@ export interface CartLineInput {
 
 export interface CartCalculationInput {
   items?: unknown;
+  customerId?: unknown;
+  selectedPromotionIds?: unknown;
+  loyaltyPointsToRedeem?: unknown;
   discountAmount?: unknown; // legacy flat transaction discount
   transactionDiscountType?: unknown;
   transactionDiscountValue?: unknown;
@@ -614,22 +588,31 @@ interface ResolvedCartCalculation {
 
 export function calculateCartAuthoritative(
   input: CartCalculationInput,
-  settings: { taxEnabled: boolean; taxRate: number },
-  options: { checkStock: boolean } = { checkStock: true }
+  settings: {
+    taxEnabled: boolean;
+    taxRate: number;
+    allowNegativeStock?: boolean;
+    allowPromoStacking?: boolean;
+    allowManualWithPromo?: boolean;
+    maxCashierDiscountPercent?: number;
+    maxAuthorizedDiscountPercent?: number;
+  },
+  options: { checkStock: boolean; strictPromotions?: boolean } = { checkStock: true }
 ): ResolvedCartCalculation {
   if (!Array.isArray(input.items) || input.items.length === 0) {
     throw new ServiceError(400, 'Keranjang belanja masih kosong.');
   }
 
+  const db = getDb();
   const allProducts = queryEnrichedProducts();
   const productMap = new Map(allProducts.map((p) => [p.id, p]));
 
-  // Merge duplicate lines only when price/discount settings match; otherwise preserve distinct lines,
-  // while still validating aggregate stock per productId!
   const aggregateQtyByProduct = new Map<string, number>();
 
   interface NormalizedLine {
     productId: string;
+    categoryId: string | null;
+    subcategoryId: string | null;
     sku: string;
     barcode: string;
     name: string;
@@ -643,7 +626,6 @@ export function calculateCartAuthoritative(
     lineDiscountType: DiscountMode;
     lineDiscountValue: number;
     lineDiscountAmount: bigint;
-    lineNetAfterDiscount: bigint;
     taxCategory: TaxCategory;
   }
 
@@ -676,7 +658,7 @@ export function calculateCartAuthoritative(
 
     const nextAggQty = (aggregateQtyByProduct.get(productId) ?? 0) + qty;
     aggregateQtyByProduct.set(productId, nextAggQty);
-    if (options.checkStock && product.stock < nextAggQty) {
+    if (options.checkStock && !settings.allowNegativeStock && product.stock < nextAggQty) {
       throw new ServiceError(
         409,
         `Stok "${product.name}" tidak mencukupi (tersedia ${product.stock} ${product.unit}).`
@@ -714,10 +696,10 @@ export function calculateCartAuthoritative(
       throw new ServiceError(400, err instanceof Error ? err.message : 'Diskon item tidak valid.');
     }
 
-    const lineNet = lineGross - ldCalc.amount;
-
     normalizedLines.push({
       productId: product.id,
+      categoryId: product.categoryId,
+      subcategoryId: product.subcategoryId,
       sku: product.sku,
       barcode: product.barcode,
       name: product.name,
@@ -731,14 +713,12 @@ export function calculateCartAuthoritative(
       lineDiscountType: ldType,
       lineDiscountValue: ldCalc.normalizedValue,
       lineDiscountAmount: ldCalc.amount,
-      lineNetAfterDiscount: lineNet,
       taxCategory: product.taxCategory,
     });
   }
 
   const subtotalBig = normalizedLines.reduce((acc, l) => acc + l.lineGrossSubtotal, 0n);
   const lineDiscountTotalBig = normalizedLines.reduce((acc, l) => acc + l.lineDiscountAmount, 0n);
-  const netAfterLineDiscountsBig = subtotalBig - lineDiscountTotalBig;
 
   const txDiscType: DiscountMode =
     input.transactionDiscountType === 'PERCENT' ? 'PERCENT' : 'AMOUNT';
@@ -747,6 +727,64 @@ export function calculateCartAuthoritative(
       ? input.transactionDiscountValue
       : input.discountAmount ?? 0;
 
+  const hasManualDiscount = lineDiscountTotalBig > 0n || Number(rawTxDiscVal || 0) > 0;
+
+  const selectedPromotionIds = Array.isArray(input.selectedPromotionIds)
+    ? input.selectedPromotionIds.map((id) => String(id))
+    : [];
+
+  const evaluableLines: EvaluableCartLine[] = normalizedLines.map((l) => ({
+    productId: l.productId,
+    categoryId: l.categoryId,
+    subcategoryId: l.subcategoryId,
+    qty: l.qty,
+    unitPrice: l.unitPrice,
+    lineGrossSubtotal: l.lineGrossSubtotal,
+    manualLineDiscountAmount: l.lineDiscountAmount,
+  }));
+
+  const promoEval = evaluatePromotionsForCart({
+    lines: evaluableLines,
+    selectedPromotionIds,
+    allowPromoStacking: settings.allowPromoStacking ?? true,
+    allowManualWithPromo: settings.allowManualWithPromo ?? false,
+    hasManualDiscount,
+    strictSelection: Boolean(options.strictPromotions),
+  });
+
+  // Attach line-level promotion discounts (once per productId)
+  const promoAttachedForProduct = new Set<string>();
+  const linesWithPromo = normalizedLines.map((l) => {
+    let promoId: string | null = null;
+    let promoName = '';
+    let promoDisc = 0n;
+    if (!promoAttachedForProduct.has(l.productId)) {
+      const matchedPromo = promoEval.linePromotions.get(l.productId);
+      if (matchedPromo && matchedPromo.discountAmount > 0n) {
+        promoAttachedForProduct.add(l.productId);
+        const available = l.lineGrossSubtotal - l.lineDiscountAmount;
+        promoDisc = matchedPromo.discountAmount > available ? available : matchedPromo.discountAmount;
+        promoId = matchedPromo.promotionId;
+        promoName = matchedPromo.promotionName;
+      }
+    }
+    const lineNet = l.lineGrossSubtotal - l.lineDiscountAmount - promoDisc;
+    return {
+      ...l,
+      promotionId: promoId,
+      promotionName: promoName,
+      promotionDiscountAmount: promoDisc,
+      lineNetAfterDiscount: lineNet,
+    };
+  });
+
+  const promotionLineDiscountTotalBig = linesWithPromo.reduce(
+    (acc, l) => acc + l.promotionDiscountAmount,
+    0n
+  );
+  const netAfterLineDiscountsBig =
+    subtotalBig - lineDiscountTotalBig - promotionLineDiscountTotalBig;
+
   let txDiscCalc: { amount: bigint; normalizedValue: number };
   try {
     txDiscCalc = calculateExactDiscount(netAfterLineDiscountsBig, txDiscType, rawTxDiscVal);
@@ -754,18 +792,105 @@ export function calculateCartAuthoritative(
     throw new ServiceError(400, err instanceof Error ? err.message : 'Diskon transaksi tidak valid.');
   }
 
-  // Proportionally allocate transaction discount across lines using exact BigInt allocation
+  // Enforce authorized manual discount ceiling
+  const manualDiscountTotalBig = lineDiscountTotalBig + txDiscCalc.amount;
+  const maxAuthorizedPct = settings.maxAuthorizedDiscountPercent ?? 100;
+  if (subtotalBig > 0n && manualDiscountTotalBig > 0n && maxAuthorizedPct < 100) {
+    const maxAllowedBps = BigInt(Math.round(maxAuthorizedPct * 100));
+    if (manualDiscountTotalBig * 10000n > subtotalBig * maxAllowedBps) {
+      throw new ServiceError(
+        400,
+        `Total diskon manual melebihi batas maksimal otorisasi (${maxAuthorizedPct}%).`,
+        'DISCOUNT_LIMIT_EXCEEDED'
+      );
+    }
+  }
+
+  const netAfterManualTx = netAfterLineDiscountsBig - txDiscCalc.amount;
+  const promotionTxDiscountBig =
+    promoEval.promotionTransactionDiscountAmount > netAfterManualTx
+      ? netAfterManualTx
+      : promoEval.promotionTransactionDiscountAmount;
+  const netAfterAllPromosBig = netAfterManualTx - promotionTxDiscountBig;
+
+  // Loyalty point redemption & earn estimation
+  const loyaltySettings = getLoyaltySettings();
+  const requestedPointsToRedeem = Math.max(
+    0,
+    Math.trunc(Number(input.loyaltyPointsToRedeem ?? 0))
+  );
+  const customerIdStr =
+    typeof input.customerId === 'string' && input.customerId.trim()
+      ? input.customerId.trim()
+      : null;
+
+  let customerRecord: { id: string; is_active: number; loyalty_points: number } | undefined;
+  if (customerIdStr) {
+    customerRecord = db
+      .prepare('SELECT id, is_active, loyalty_points FROM customers WHERE id = ?')
+      .get(customerIdStr) as
+      | { id: string; is_active: number; loyalty_points: number }
+      | undefined;
+    if (!customerRecord) {
+      throw new ServiceError(404, 'Pelanggan yang dipilih tidak ditemukan.');
+    }
+    if (customerRecord.is_active !== 1) {
+      throw new ServiceError(400, 'Pelanggan yang dipilih berstatus nonaktif.');
+    }
+  }
+
+  let loyaltyPointsRedeemed = 0;
+  let loyaltyDiscountBig = 0n;
+
+  if (requestedPointsToRedeem > 0) {
+    if (!customerRecord) {
+      throw new ServiceError(400, 'Penukaran poin loyalitas hanya berlaku untuk pelanggan terdaftar.');
+    }
+    if (!loyaltySettings.enabled || loyaltySettings.pointValueRp <= 0) {
+      throw new ServiceError(400, 'Fitur penukaran poin loyalitas sedang nonaktif.');
+    }
+    if (requestedPointsToRedeem < loyaltySettings.minRedeemPoints) {
+      throw new ServiceError(
+        400,
+        `Minimum penukaran poin adalah ${loyaltySettings.minRedeemPoints} poin.`
+      );
+    }
+    if (requestedPointsToRedeem > customerRecord.loyalty_points) {
+      throw new ServiceError(
+        400,
+        `Saldo poin tidak mencukupi (tersedia ${customerRecord.loyalty_points} poin).`
+      );
+    }
+    const maxRedeemRpBig = roundHalfUpDiv(
+      netAfterAllPromosBig * BigInt(Math.round(loyaltySettings.maxRedeemPercent)),
+      100n
+    );
+    const desiredRpBig = BigInt(requestedPointsToRedeem) * BigInt(loyaltySettings.pointValueRp);
+    if (desiredRpBig > maxRedeemRpBig) {
+      const maxPointsAllowed = Math.floor(Number(maxRedeemRpBig) / loyaltySettings.pointValueRp);
+      throw new ServiceError(
+        400,
+        `Penukaran poin maksimal ${loyaltySettings.maxRedeemPercent}% dari nilai transaksi (${maxPointsAllowed} poin / Rp ${Number(maxRedeemRpBig).toLocaleString('id-ID')}).`
+      );
+    }
+    loyaltyPointsRedeemed = requestedPointsToRedeem;
+    loyaltyDiscountBig = desiredRpBig > netAfterAllPromosBig ? netAfterAllPromosBig : desiredRpBig;
+  }
+
+  const totalTxLevelDeductionBig = txDiscCalc.amount + promotionTxDiscountBig + loyaltyDiscountBig;
+
+  // Proportionally allocate transaction-level discounts & loyalty discount across lines
   const lineTxDiscountShares = allocateProportionally(
-    txDiscCalc.amount,
-    normalizedLines.map((l) => l.lineNetAfterDiscount)
+    totalTxLevelDeductionBig,
+    linesWithPromo.map((l) => l.lineNetAfterDiscount)
   );
 
   const shouldApplyTax =
     typeof input.applyTax === 'boolean' ? input.applyTax : settings.taxEnabled;
-  const standardTaxBps = parseDecimalToScaledInt(settings.taxRate, 2); // e.g., 11 -> 1100n bps
+  const standardTaxBps = parseDecimalToScaledInt(settings.taxRate, 2);
 
   let taxAmountBig = 0n;
-  const itemsWithCost = normalizedLines.map((l, idx) => {
+  const itemsWithCost = linesWithPromo.map((l, idx) => {
     const lineTaxable = l.lineNetAfterDiscount - lineTxDiscountShares[idx];
     let lineTaxBig = 0n;
     if (shouldApplyTax && lineTaxable > 0n && standardTaxBps > 0n) {
@@ -795,6 +920,9 @@ export function calculateCartAuthoritative(
       lineDiscountType: l.lineDiscountType,
       lineDiscountValue: l.lineDiscountValue,
       lineDiscountAmount: Number(l.lineDiscountAmount),
+      promotionId: l.promotionId,
+      promotionName: l.promotionName,
+      promotionDiscountAmount: Number(l.promotionDiscountAmount),
       lineNetAfterDiscount: Number(l.lineNetAfterDiscount),
       lineTaxAmount: Number(lineTaxBig),
       taxCategory: l.taxCategory,
@@ -803,26 +931,41 @@ export function calculateCartAuthoritative(
     };
   });
 
-  const taxableAmountBig = netAfterLineDiscountsBig - txDiscCalc.amount;
+  const taxableAmountBig = netAfterAllPromosBig - loyaltyDiscountBig;
   const grandTotalBig = taxableAmountBig + taxAmountBig;
   const totalCost = itemsWithCost.reduce((s, i) => s + i.lineCostTotal, 0);
   const grossProfit = Number(taxableAmountBig) - totalCost;
-  const totalDiscountBig = lineDiscountTotalBig + txDiscCalc.amount;
+  const totalPromotionDiscountBig = promotionLineDiscountTotalBig + promotionTxDiscountBig;
+  const totalDiscountBig =
+    lineDiscountTotalBig + txDiscCalc.amount + totalPromotionDiscountBig + loyaltyDiscountBig;
+
+  const estimatedPointsEarned =
+    loyaltySettings.enabled && customerRecord && loyaltySettings.pointsPerAmount > 0
+      ? Math.floor(Number(taxableAmountBig) / loyaltySettings.pointsPerAmount)
+      : 0;
 
   return {
     preview: {
       items: itemsWithCost.map(({ costPrice: _c, lineCostTotal: _lc, ...p }) => p),
       subtotal: Number(subtotalBig),
       lineDiscountTotal: Number(lineDiscountTotalBig),
+      promotionLineDiscountTotal: Number(promotionLineDiscountTotalBig),
       netAfterLineDiscounts: Number(netAfterLineDiscountsBig),
       transactionDiscountType: txDiscType,
       transactionDiscountValue: txDiscCalc.normalizedValue,
       transactionDiscountAmount: Number(txDiscCalc.amount),
+      promotionTransactionDiscountAmount: Number(promotionTxDiscountBig),
+      totalPromotionDiscount: Number(totalPromotionDiscountBig),
+      loyaltyPointsRedeemed,
+      loyaltyDiscountAmount: Number(loyaltyDiscountBig),
+      estimatedPointsEarned,
+      appliedPromotions: promoEval.appliedPromotions,
+      eligiblePromotions: promoEval.eligiblePromotions,
       totalDiscount: Number(totalDiscountBig),
       taxableAmount: Number(taxableAmountBig),
       taxAmount: Number(taxAmountBig),
       grandTotal: Number(grandTotalBig),
-      requiresDiscountApproval: totalDiscountBig > 0n,
+      requiresDiscountApproval: manualDiscountTotalBig > 0n,
       requiresPriceOverrideApproval: itemsWithCost.some((i) => i.priceOverride),
     },
     totalCost,
@@ -844,21 +987,48 @@ export function holdTransaction(
 ): Transaction {
   const db = getDb();
   const settingsRow = db
-    .prepare('SELECT tax_enabled, tax_rate FROM store_settings WHERE id = 1')
-    .get() as { tax_enabled: number; tax_rate: number };
-  const settings = { taxEnabled: settingsRow.tax_enabled === 1, taxRate: settingsRow.tax_rate };
+    .prepare(`
+      SELECT tax_enabled, tax_rate, allow_negative_stock,
+             allow_promo_stacking, allow_manual_with_promo,
+             max_cashier_discount_percent, max_authorized_discount_percent
+      FROM store_settings WHERE id = 1
+    `)
+    .get() as {
+    tax_enabled: number;
+    tax_rate: number;
+    allow_negative_stock?: number;
+    allow_promo_stacking?: number;
+    allow_manual_with_promo?: number;
+    max_cashier_discount_percent?: number;
+    max_authorized_discount_percent?: number;
+  };
+  const settings = {
+    taxEnabled: settingsRow.tax_enabled === 1,
+    taxRate: settingsRow.tax_rate,
+    allowNegativeStock: settingsRow.allow_negative_stock === 1,
+    allowPromoStacking: (settingsRow.allow_promo_stacking ?? 1) === 1,
+    allowManualWithPromo: (settingsRow.allow_manual_with_promo ?? 0) === 1,
+    maxCashierDiscountPercent: settingsRow.max_cashier_discount_percent ?? 25,
+    maxAuthorizedDiscountPercent: settingsRow.max_authorized_discount_percent ?? 100,
+  };
 
-  const calc = calculateCartAuthoritative(input, settings, { checkStock: true });
+  const calc = calculateCartAuthoritative(input, settings, {
+    checkStock: true,
+    strictPromotions: true,
+  });
   const nowIso = new Date().toISOString();
 
   let customerId: string | null = null;
   let customerName = 'Pelanggan Umum';
   if (typeof input.customerId === 'string' && input.customerId.trim()) {
     const cust = db
-      .prepare('SELECT id, name FROM customers WHERE id = ?')
-      .get(input.customerId.trim()) as { id: string; name: string } | undefined;
+      .prepare('SELECT id, name, is_active FROM customers WHERE id = ?')
+      .get(input.customerId.trim()) as { id: string; name: string; is_active: number } | undefined;
     if (!cust) {
       throw new ServiceError(404, 'Pelanggan yang dipilih tidak ditemukan.');
+    }
+    if (cust.is_active !== 1) {
+      throw new ServiceError(400, 'Pelanggan yang dipilih berstatus nonaktif.');
     }
     customerId = cust.id;
     customerName = cust.name;
@@ -867,6 +1037,8 @@ export function holdTransaction(
   const notes = typeof input.notes === 'string' ? input.notes.trim() : '';
   const shouldApplyTax =
     typeof input.applyTax === 'boolean' ? input.applyTax : settings.taxEnabled;
+  const promoIdsJson = JSON.stringify(calc.preview.appliedPromotions.map((p) => p.id));
+  const appliedPromosJson = JSON.stringify(calc.preview.appliedPromotions);
 
   const existingHoldId =
     typeof input.heldTransactionId === 'string' && input.heldTransactionId.trim()
@@ -894,6 +1066,9 @@ export function holdTransaction(
             customer_id = ?, customer_name = ?,
             subtotal = ?, line_discount_total = ?,
             transaction_discount_type = ?, transaction_discount_value = ?, transaction_discount_amount = ?,
+            promotion_ids_json = ?, promotion_discount_amount = ?,
+            loyalty_points_earned = 0, loyalty_points_redeemed = ?, loyalty_discount_amount = ?,
+            applied_promotions_json = ?,
             discount_amount = ?, apply_tax = ?, tax_amount = ?, total = ?,
             total_cost = ?, gross_profit = ?, notes = ?,
             cashier_id = ?, cashier_name = ?, held_at = ?, updated_at = ?
@@ -906,6 +1081,11 @@ export function holdTransaction(
         calc.preview.transactionDiscountType,
         calc.preview.transactionDiscountValue,
         calc.preview.transactionDiscountAmount,
+        promoIdsJson,
+        calc.preview.totalPromotionDiscount,
+        calc.preview.loyaltyPointsRedeemed,
+        calc.preview.loyaltyDiscountAmount,
+        appliedPromosJson,
         calc.preview.totalDiscount,
         shouldApplyTax ? 1 : 0,
         calc.preview.taxAmount,
@@ -928,11 +1108,13 @@ export function holdTransaction(
         INSERT INTO transactions (
           id, invoice_number, status, payment_status, customer_id, customer_name,
           subtotal, line_discount_total, transaction_discount_type, transaction_discount_value,
-          transaction_discount_amount, discount_amount, apply_tax, tax_amount, total,
+          transaction_discount_amount, promotion_ids_json, promotion_discount_amount,
+          loyalty_points_earned, loyalty_points_redeemed, loyalty_discount_amount, applied_promotions_json,
+          discount_amount, apply_tax, tax_amount, total,
           cash_received, change_amount, payment_method, total_cost, gross_profit,
           notes, idempotency_key, cashier_id, cashier_name,
           held_at, cancelled_at, completed_at, created_at, updated_at
-        ) VALUES (?, ?, 'HELD', 'UNPAID', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 'Belum Bayar', ?, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?, ?)
+        ) VALUES (?, ?, 'HELD', 'UNPAID', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, 0, 0, 'Belum Bayar', ?, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?, ?)
       `).run(
         trxId,
         holdNumber,
@@ -943,6 +1125,11 @@ export function holdTransaction(
         calc.preview.transactionDiscountType,
         calc.preview.transactionDiscountValue,
         calc.preview.transactionDiscountAmount,
+        promoIdsJson,
+        calc.preview.totalPromotionDiscount,
+        calc.preview.loyaltyPointsRedeemed,
+        calc.preview.loyaltyDiscountAmount,
+        appliedPromosJson,
         calc.preview.totalDiscount,
         shouldApplyTax ? 1 : 0,
         calc.preview.taxAmount,
@@ -963,8 +1150,9 @@ export function holdTransaction(
         id, transaction_id, product_id, sku, barcode, name, unit, qty,
         original_sell_price, sell_price, price_override, cost_price,
         line_discount_type, line_discount_value, line_discount_amount,
+        promotion_id, promotion_name, promotion_discount_amount,
         tax_category, tax_amount, subtotal
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     calc.itemsWithCost.forEach((item, idx) => {
@@ -984,6 +1172,9 @@ export function holdTransaction(
         item.lineDiscountType,
         item.lineDiscountValue,
         item.lineDiscountAmount,
+        item.promotionId ?? null,
+        item.promotionName ?? '',
+        item.promotionDiscountAmount ?? 0,
         item.taxCategory,
         item.lineTaxAmount,
         item.lineNetAfterDiscount
@@ -1138,17 +1329,39 @@ export function executeTransactionalCheckout(
     }
   }
 
-  // 1-6. Validate products, prices, discounts, stock rules, and compute exact totals
+  // 1-6. Validate products, prices, discounts, promotions, loyalty, stock rules, and compute exact totals
   const settingsRow = db
-    .prepare('SELECT tax_enabled, tax_rate, cashier_name FROM store_settings WHERE id = 1')
-    .get() as { tax_enabled: number; tax_rate: number; cashier_name: string };
+    .prepare(`
+      SELECT tax_enabled, tax_rate, cashier_name, allow_negative_stock,
+             allow_promo_stacking, allow_manual_with_promo,
+             max_cashier_discount_percent, max_authorized_discount_percent
+      FROM store_settings WHERE id = 1
+    `)
+    .get() as {
+    tax_enabled: number;
+    tax_rate: number;
+    cashier_name: string;
+    allow_negative_stock?: number;
+    allow_promo_stacking?: number;
+    allow_manual_with_promo?: number;
+    max_cashier_discount_percent?: number;
+    max_authorized_discount_percent?: number;
+  };
   const settings = {
     taxEnabled: settingsRow.tax_enabled === 1,
     taxRate: settingsRow.tax_rate,
     cashierName: settingsRow.cashier_name,
+    allowNegativeStock: settingsRow.allow_negative_stock === 1,
+    allowPromoStacking: (settingsRow.allow_promo_stacking ?? 1) === 1,
+    allowManualWithPromo: (settingsRow.allow_manual_with_promo ?? 0) === 1,
+    maxCashierDiscountPercent: settingsRow.max_cashier_discount_percent ?? 25,
+    maxAuthorizedDiscountPercent: settingsRow.max_authorized_discount_percent ?? 100,
   };
 
-  const calc = calculateCartAuthoritative(input, settings, { checkStock: true });
+  const calc = calculateCartAuthoritative(input, settings, {
+    checkStock: true,
+    strictPromotions: true,
+  });
 
   // Authorization checks (Discounts & Price Overrides)
   const canApproveDiscount = !actor || actor.permissions.includes('pos:discount_approve');
@@ -1186,10 +1399,13 @@ export function executeTransactionalCheckout(
   let customerName = 'Pelanggan Umum';
   if (typeof input.customerId === 'string' && input.customerId.trim()) {
     const cust = db
-      .prepare('SELECT id, name FROM customers WHERE id = ?')
-      .get(input.customerId.trim()) as { id: string; name: string } | undefined;
+      .prepare('SELECT id, name, is_active FROM customers WHERE id = ?')
+      .get(input.customerId.trim()) as { id: string; name: string; is_active: number } | undefined;
     if (!cust) {
       throw new ServiceError(404, 'Pelanggan yang dipilih tidak ditemukan.');
+    }
+    if (cust.is_active !== 1) {
+      throw new ServiceError(400, 'Pelanggan yang dipilih berstatus nonaktif.');
     }
     customerId = cust.id;
     customerName = cust.name;
@@ -1368,6 +1584,11 @@ export function executeTransactionalCheckout(
       ? input.heldTransactionId.trim()
       : null;
 
+  const promoIdsJson = JSON.stringify(calc.preview.appliedPromotions.map((p) => p.id));
+  const appliedPromosJson = JSON.stringify(calc.preview.appliedPromotions);
+  const pointsEarned = customerId ? calc.preview.estimatedPointsEarned : 0;
+  const pointsRedeemed = customerId ? calc.preview.loyaltyPointsRedeemed : 0;
+
   // 8-14. Execute atomic DB transaction
   db.exec('BEGIN IMMEDIATE;');
   try {
@@ -1396,6 +1617,9 @@ export function executeTransactionalCheckout(
             customer_id = ?, customer_name = ?,
             subtotal = ?, line_discount_total = ?,
             transaction_discount_type = ?, transaction_discount_value = ?, transaction_discount_amount = ?,
+            promotion_ids_json = ?, promotion_discount_amount = ?,
+            loyalty_points_earned = ?, loyalty_points_redeemed = ?, loyalty_discount_amount = ?,
+            applied_promotions_json = ?,
             discount_amount = ?, apply_tax = ?, tax_amount = ?, total = ?,
             cash_received = ?, change_amount = ?, payment_method = ?,
             total_cost = ?, gross_profit = ?, notes = ?, idempotency_key = ?,
@@ -1410,6 +1634,12 @@ export function executeTransactionalCheckout(
         calc.preview.transactionDiscountType,
         calc.preview.transactionDiscountValue,
         calc.preview.transactionDiscountAmount,
+        promoIdsJson,
+        calc.preview.totalPromotionDiscount,
+        pointsEarned,
+        pointsRedeemed,
+        calc.preview.loyaltyDiscountAmount,
+        appliedPromosJson,
         calc.preview.totalDiscount,
         shouldApplyTax ? 1 : 0,
         calc.preview.taxAmount,
@@ -1435,11 +1665,13 @@ export function executeTransactionalCheckout(
         INSERT INTO transactions (
           id, invoice_number, status, payment_status, customer_id, customer_name,
           subtotal, line_discount_total, transaction_discount_type, transaction_discount_value,
-          transaction_discount_amount, discount_amount, apply_tax, tax_amount, total,
+          transaction_discount_amount, promotion_ids_json, promotion_discount_amount,
+          loyalty_points_earned, loyalty_points_redeemed, loyalty_discount_amount, applied_promotions_json,
+          discount_amount, apply_tax, tax_amount, total,
           cash_received, change_amount, payment_method, total_cost, gross_profit,
           notes, idempotency_key, cashier_id, cashier_name,
           held_at, cancelled_at, completed_at, created_at, updated_at
-        ) VALUES (?, ?, 'COMPLETED', 'PAID', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)
+        ) VALUES (?, ?, 'COMPLETED', 'PAID', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)
       `).run(
         trxId,
         invoiceNumber,
@@ -1450,6 +1682,12 @@ export function executeTransactionalCheckout(
         calc.preview.transactionDiscountType,
         calc.preview.transactionDiscountValue,
         calc.preview.transactionDiscountAmount,
+        promoIdsJson,
+        calc.preview.totalPromotionDiscount,
+        pointsEarned,
+        pointsRedeemed,
+        calc.preview.loyaltyDiscountAmount,
+        appliedPromosJson,
         calc.preview.totalDiscount,
         shouldApplyTax ? 1 : 0,
         calc.preview.taxAmount,
@@ -1474,15 +1712,17 @@ export function executeTransactionalCheckout(
         id, transaction_id, product_id, sku, barcode, name, unit, qty,
         original_sell_price, sell_price, price_override, cost_price,
         line_discount_type, line_discount_value, line_discount_amount,
+        promotion_id, promotion_name, promotion_discount_amount,
         tax_category, tax_amount, subtotal
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const selectStockStmt = db.prepare('SELECT stock FROM products WHERE id = ?');
     const updateStockStmt = db.prepare('UPDATE products SET stock = ?, updated_at = ? WHERE id = ?');
     const insertMovStmt = db.prepare(`
       INSERT INTO stock_movements (
-        id, product_id, product_name, barcode, type, qty_delta, stock_before, stock_after, reference_id, notes, created_at
-      ) VALUES (?, ?, ?, ?, 'PENJUALAN', ?, ?, ?, ?, ?, ?)
+        id, product_id, sku, product_name, barcode, type, qty_delta, stock_before, stock_after,
+        unit_cost, reference_id, reason, notes, actor_user_id, actor_name, movement_date, created_at
+      ) VALUES (?, ?, ?, ?, ?, 'PENJUALAN', ?, ?, ?, ?, ?, 'Penjualan Kasir', ?, ?, ?, ?, ?)
     `);
 
     calc.itemsWithCost.forEach((item, idx) => {
@@ -1502,13 +1742,16 @@ export function executeTransactionalCheckout(
         item.lineDiscountType,
         item.lineDiscountValue,
         item.lineDiscountAmount,
+        item.promotionId ?? null,
+        item.promotionName ?? '',
+        item.promotionDiscountAmount ?? 0,
         item.taxCategory,
         item.lineTaxAmount,
         item.lineNetAfterDiscount
       );
 
       const stockRow = selectStockStmt.get(item.productId) as { stock: number } | undefined;
-      if (!stockRow || stockRow.stock < item.qty) {
+      if (!stockRow || (!settings.allowNegativeStock && stockRow.stock < item.qty)) {
         throw new ServiceError(
           409,
           `Stok "${item.name}" berubah dan tidak mencukupi (tersedia ${stockRow?.stock ?? 0} ${item.unit}).`
@@ -1520,13 +1763,18 @@ export function executeTransactionalCheckout(
       insertMovStmt.run(
         `mov-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
         item.productId,
+        item.sku,
         item.name,
         item.barcode,
         -item.qty,
         stockBefore,
         stockAfter,
+        item.costPrice,
         invoiceNumber,
         `Penjualan ${summaryPaymentMethod} (${item.qty} ${item.unit})`,
+        actor?.id ?? null,
+        cashierName,
+        nowIso,
         nowIso
       );
     });
@@ -1552,6 +1800,30 @@ export function executeTransactionalCheckout(
       );
     });
 
+    // Update promotion usage counters atomically
+    if (calc.preview.appliedPromotions.length > 0) {
+      const incPromoUsage = db.prepare(
+        'UPDATE promotions SET usage_count = usage_count + 1, updated_at = ? WHERE id = ?'
+      );
+      for (const ap of calc.preview.appliedPromotions) {
+        incPromoUsage.run(nowIso, ap.id);
+      }
+    }
+
+    // Record loyalty point earn/redeem ledger atomically
+    if (customerId && (pointsEarned > 0 || pointsRedeemed > 0)) {
+      applyLoyaltyForCompletedTransactionTx(db, {
+        customerId,
+        transactionId: trxId,
+        invoiceNumber,
+        pointsRedeemed,
+        pointsEarned,
+        actorUserId: actor?.id ?? null,
+        actorName: cashierName,
+        nowIso,
+      });
+    }
+
     captureReceiptSnapshotTx(db, trxId, invoiceNumber, nowIso);
 
     recordAuditLog(db, {
@@ -1560,7 +1832,11 @@ export function executeTransactionalCheckout(
       entityId: invoiceNumber,
       actorUserId: actor?.id ?? null,
       actor: cashierName,
-      summary: `Transaksi ${invoiceNumber} (${summaryPaymentMethod}) senilai Rp ${calc.preview.grandTotal.toLocaleString('id-ID')} · ${calc.itemsWithCost.length} baris`,
+      summary: `Transaksi ${invoiceNumber} (${summaryPaymentMethod}) senilai Rp ${calc.preview.grandTotal.toLocaleString('id-ID')} · ${calc.itemsWithCost.length} baris${
+        calc.preview.appliedPromotions.length > 0
+          ? ` · Promo: ${calc.preview.appliedPromotions.map((p) => p.code).join(', ')}`
+          : ''
+      }`,
     });
 
     db.exec('COMMIT;');

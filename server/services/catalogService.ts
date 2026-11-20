@@ -1297,6 +1297,19 @@ export function updateProductImageMetadata(
       );
     }
 
+    const hasEmbedding = Boolean(
+      db.prepare('SELECT 1 FROM product_image_embeddings WHERE image_id = ?').get(imageId)
+    );
+    if (!isAiReference && !isPrimary) {
+      db.prepare('DELETE FROM product_image_embeddings WHERE image_id = ?').run(imageId);
+    }
+
+    const nextEmbeddingStatus = isAiReference
+      ? hasEmbedding
+        ? 'READY'
+        : 'PENDING'
+      : 'NOT_APPLICABLE';
+
     db.prepare(`
       UPDATE product_images
       SET is_primary = ?, is_ai_reference = ?, reference_angle = ?,
@@ -1306,7 +1319,7 @@ export function updateProductImageMetadata(
       isPrimary ? 1 : 0,
       isAiReference ? 1 : 0,
       referenceAngle,
-      isAiReference ? 'PENDING' : 'NOT_APPLICABLE',
+      nextEmbeddingStatus,
       imageId
     );
 
@@ -1623,8 +1636,9 @@ export function commitProductCsvImport(
     `);
     const insertMovStmt = db.prepare(`
       INSERT INTO stock_movements (
-        id, product_id, product_name, barcode, type, qty_delta, stock_before, stock_after, reference_id, notes, created_at
-      ) VALUES (?, ?, ?, ?, 'STOK_AWAL', ?, 0, ?, 'IMPORT-CSV', 'Stok awal dari impor CSV katalog', ?)
+        id, product_id, sku, product_name, barcode, type, qty_delta, stock_before, stock_after,
+        unit_cost, reference_id, reason, notes, actor_user_id, actor_name, movement_date, created_at
+      ) VALUES (?, ?, ?, ?, ?, 'STOK_AWAL', ?, 0, ?, ?, 'IMPORT-CSV', 'Stok Awal Impor', 'Stok awal dari impor CSV katalog', ?, ?, ?, ?)
     `);
 
     for (const row of validRows) {
@@ -1719,10 +1733,15 @@ export function commitProductCsvImport(
         insertMovStmt.run(
           `mov-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
           productId,
+          sku,
           row.name,
           row.barcode,
           row.stock,
           row.stock,
+          row.costPrice,
+          actor.id,
+          actor.fullName,
+          nowIso,
           nowIso
         );
       }

@@ -106,6 +106,11 @@ export function TransactionDetailModal({
                         {item.barcode}
                         {item.priceOverride ? ' · Harga Override' : ''}
                       </p>
+                      {(item.promotionDiscountAmount ?? 0) > 0 && (
+                        <p className="text-[11px] text-teal-700 font-medium">
+                          Promo: {item.promotionName || 'Diskon Promo'}
+                        </p>
+                      )}
                     </td>
                     <td className="py-2.5 px-3 text-right font-mono">
                       {item.qty} {item.unit}
@@ -119,9 +124,19 @@ export function TransactionDetailModal({
                       )}
                     </td>
                     <td className="py-2.5 px-3 text-right font-mono text-rose-700">
-                      {(item.lineDiscountAmount ?? 0) > 0
-                        ? `-${formatRupiah(item.lineDiscountAmount ?? 0)}`
-                        : '—'}
+                      {(item.lineDiscountAmount ?? 0) > 0 && (
+                        <span className="block">
+                          -{formatRupiah(item.lineDiscountAmount ?? 0)}
+                        </span>
+                      )}
+                      {(item.promotionDiscountAmount ?? 0) > 0 && (
+                        <span className="block text-teal-700">
+                          -{formatRupiah(item.promotionDiscountAmount ?? 0)}
+                        </span>
+                      )}
+                      {(item.lineDiscountAmount ?? 0) === 0 &&
+                        (item.promotionDiscountAmount ?? 0) === 0 &&
+                        '—'}
                     </td>
                     <td className="py-2.5 px-3 text-right font-mono text-slate-600">
                       {(item.taxAmount ?? 0) > 0 ? formatRupiah(item.taxAmount ?? 0) : '—'}
@@ -165,6 +180,26 @@ export function TransactionDetailModal({
             </div>
           )}
 
+          {/* Applied Promotions */}
+          {transaction.appliedPromotions && transaction.appliedPromotions.length > 0 && (
+            <div className="border border-slate-200 rounded-xl p-3.5 space-y-1.5 text-xs">
+              <p className="font-semibold text-slate-800">Promosi Diterapkan</p>
+              <div className="divide-y divide-slate-100 tabular-nums">
+                {transaction.appliedPromotions.map((pr) => (
+                  <div key={pr.id} className="py-1.5 flex items-center justify-between gap-2">
+                    <div>
+                      <span className="font-mono font-bold text-slate-900 mr-1.5">{pr.code}</span>
+                      <span className="text-slate-700">{pr.name}</span>
+                    </div>
+                    <span className="font-mono font-semibold text-teal-700">
+                      -{formatRupiah(pr.discountAmount)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Totals Breakdown */}
           <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-1.5 text-xs tabular-nums">
             <div className="flex justify-between text-slate-600">
@@ -177,11 +212,27 @@ export function TransactionDetailModal({
                 <span className="font-mono">-{formatRupiah(transaction.lineDiscountTotal)}</span>
               </div>
             )}
+            {(transaction.promotionDiscountAmount ?? 0) > 0 && (
+              <div className="flex justify-between text-teal-700">
+                <span>Diskon Promosi</span>
+                <span className="font-mono">
+                  -{formatRupiah(transaction.promotionDiscountAmount ?? 0)}
+                </span>
+              </div>
+            )}
             {transaction.transactionDiscountAmount > 0 && (
               <div className="flex justify-between text-rose-700">
                 <span>Diskon Transaksi</span>
                 <span className="font-mono">
                   -{formatRupiah(transaction.transactionDiscountAmount)}
+                </span>
+              </div>
+            )}
+            {(transaction.loyaltyDiscountAmount ?? 0) > 0 && (
+              <div className="flex justify-between text-teal-700">
+                <span>Tukar Poin Loyalitas ({transaction.loyaltyPointsRedeemed ?? 0} poin)</span>
+                <span className="font-mono">
+                  -{formatRupiah(transaction.loyaltyDiscountAmount ?? 0)}
                 </span>
               </div>
             )}
@@ -195,6 +246,24 @@ export function TransactionDetailModal({
               <span>Grand Total</span>
               <span className="font-mono text-teal-800">{formatRupiah(transaction.total)}</span>
             </div>
+            {((transaction.loyaltyPointsEarned ?? 0) > 0 ||
+              (transaction.loyaltyPointsRedeemed ?? 0) > 0) && (
+              <div className="flex justify-between text-[11px] text-teal-800 pt-1">
+                <span>Mutasi Poin Loyalitas Member</span>
+                <span className="font-mono font-semibold">
+                  {(transaction.loyaltyPointsEarned ?? 0) > 0
+                    ? `+${transaction.loyaltyPointsEarned} didapat`
+                    : ''}
+                  {(transaction.loyaltyPointsEarned ?? 0) > 0 &&
+                  (transaction.loyaltyPointsRedeemed ?? 0) > 0
+                    ? ' · '
+                    : ''}
+                  {(transaction.loyaltyPointsRedeemed ?? 0) > 0
+                    ? `-${transaction.loyaltyPointsRedeemed} ditukar`
+                    : ''}
+                </span>
+              </div>
+            )}
             {transaction.status === 'COMPLETED' && (
               <div className="flex justify-between text-[11px] text-emerald-700 pt-1">
                 <span>Estimasi Laba Kotor (Modal {formatRupiah(transaction.totalCost)})</span>

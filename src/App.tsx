@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   BarChart3,
   Boxes,
+  ClipboardCheck,
   History,
   LogOut,
   Menu,
@@ -10,7 +11,9 @@ import {
   ScanBarcode,
   Settings,
   Shield,
+  Tag,
   User,
+  UserCheck,
   Users,
   X,
 } from 'lucide-react';
@@ -27,7 +30,9 @@ import type {
 } from './types';
 import { apiFetch, ApiError, clearStoredTokens, getStoredTokens } from './utils/api';
 import { AccessDeniedView } from './components/AccessDeniedView';
+import type { RecognitionNewProductPrefill } from './components/AiRecognitionModal';
 import { CashierView, type CashierCheckoutPayload } from './components/CashierView';
+import { CustomersView } from './components/CustomersView';
 import { InventoryView } from './components/InventoryView';
 import { LoginScreen } from './components/LoginScreen';
 import { PinAuthorizationModal } from './components/PinAuthorizationModal';
@@ -38,11 +43,14 @@ import {
   StockAdjustModal,
 } from './components/ProductModals';
 import { ProfileModal } from './components/ProfileModal';
+import { PromotionsView } from './components/PromotionsView';
 import { ReceiptDetailView } from './components/ReceiptDetailView';
 import { ReceiptModal } from './components/ReceiptModal';
 import { RolesPermissionsView } from './components/RolesPermissionsView';
 import { SecurityAuditView } from './components/SecurityAuditView';
 import { SettingsModal } from './components/SettingsModal';
+import { StockCardModal } from './components/StockCardModal';
+import { StockControlView } from './components/StockControlView';
 import { StockReportView } from './components/StockReportView';
 import { TransactionDetailModal } from './components/TransactionDetailModal';
 import { TransactionsView } from './components/TransactionsView';
@@ -51,8 +59,11 @@ import { UsersView } from './components/UsersView';
 type AppTab =
   | 'cashier'
   | 'reports'
+  | 'stock'
   | 'inventory'
   | 'transactions'
+  | 'customers'
+  | 'promotions'
   | 'users'
   | 'roles'
   | 'security';
@@ -67,8 +78,11 @@ interface NavDefinition {
 const NAV_ITEMS: NavDefinition[] = [
   { id: 'cashier', label: 'Kasir & Scan Kamera', icon: ScanBarcode, requiredAnyPermissions: ['pos:view'] },
   { id: 'reports', label: 'Laporan Stok Otomatis', icon: BarChart3, requiredAnyPermissions: ['reports:view', 'stock:view'] },
+  { id: 'stock', label: 'Kontrol & Opname Stok', icon: ClipboardCheck, requiredAnyPermissions: ['stock:view', 'reports:view'] },
   { id: 'inventory', label: 'Produk & Barcode', icon: Boxes, requiredAnyPermissions: ['products:view'] },
   { id: 'transactions', label: 'Riwayat Transaksi', icon: ReceiptText, requiredAnyPermissions: ['transactions:view'] },
+  { id: 'customers', label: 'Pelanggan & Member', icon: UserCheck, requiredAnyPermissions: ['customers:view', 'pos:view'] },
+  { id: 'promotions', label: 'Promosi & Loyalitas', icon: Tag, requiredAnyPermissions: ['promotions:view', 'promotions:manage', 'pos:view'] },
   { id: 'users', label: 'Manajemen Pengguna', icon: Users, requiredAnyPermissions: ['users:view'] },
   { id: 'roles', label: 'Role & Hak Akses', icon: Shield, requiredAnyPermissions: ['roles:view'] },
   { id: 'security', label: 'Sesi & Audit Log', icon: History },
@@ -90,6 +104,7 @@ export default function App() {
   const [productModalOpen, setProductModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [prefillBarcode, setPrefillBarcode] = useState<string | undefined>(undefined);
+  const [aiPrefill, setAiPrefill] = useState<RecognitionNewProductPrefill | null>(null);
   const [adjustingProduct, setAdjustingProduct] = useState<Product | null>(null);
   const [barcodeProduct, setBarcodeProduct] = useState<Product | null>(null);
   const [receiptTransaction, setReceiptTransaction] = useState<Transaction | null>(null);
@@ -98,6 +113,7 @@ export default function App() {
   const [resumedTransaction, setResumedTransaction] = useState<Transaction | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [stockCardProductId, setStockCardProductId] = useState<string | null>(null);
   const [publicReceiptParams, setPublicReceiptParams] = useState<{
     receiptId: string;
     token: string;
@@ -303,6 +319,8 @@ export default function App() {
     items: CashierCheckoutPayload['items'];
     transactionDiscountType: DiscountMode;
     transactionDiscountValue: number;
+    selectedPromotionIds?: string[];
+    loyaltyPointsToRedeem?: number;
     applyTax: boolean;
   }): Promise<Transaction> => {
     setActionError(null);
@@ -368,6 +386,19 @@ export default function App() {
       body: JSON.stringify(payload),
     });
     setStoreData(body.store);
+
+    if (!isEdit && aiPrefill?.logId) {
+      apiFetch(`/api/recognition/logs/${aiPrefill.logId}/feedback`, {
+        method: 'POST',
+        body: JSON.stringify({
+          outcome: 'REGISTERED_NEW',
+          selectedProductId: body.product.id,
+          notes: `Produk baru "${body.product.name}" didaftarkan dari deteksi AI`,
+        }),
+      }).catch(() => {});
+      setAiPrefill(null);
+    }
+
     return body.product;
   };
 
@@ -452,6 +483,20 @@ export default function App() {
     setStoreData(body.store);
   };
 
+  const requestStockPinToken = (opts: { title: string; description: string }): Promise<string> => {
+    return new Promise<string>((resolve, reject) => {
+      setPinRequest({
+        action: 'stock_adjustment',
+        title: opts.title,
+        description: opts.description,
+        onTokenReady: async (token) => {
+          resolve(token);
+        },
+        onCancel: () => reject(new Error('Otorisasi PIN dibatalkan.')),
+      });
+    });
+  };
+
   if (publicReceiptParams) {
     return (
       <div className="min-h-screen bg-slate-50 text-slate-900">
@@ -513,6 +558,16 @@ export default function App() {
   const canResumeTransaction = currentUser.permissions.includes('pos:resume');
   const canCancelTransaction = currentUser.permissions.includes('pos:cancel');
   const canEditSettings = currentUser.permissions.includes('settings:edit');
+  const canCreateCustomer =
+    currentUser.permissions.includes('customers:create') ||
+    currentUser.permissions.includes('pos:create');
+  const canEditCustomer = currentUser.permissions.includes('customers:edit');
+  const canManagePromotions = currentUser.permissions.includes('promotions:manage');
+  const canUseAiRecognition =
+    currentUser.permissions.includes('recognition:use') ||
+    currentUser.permissions.includes('pos:view');
+  const canManageAiRecognition =
+    currentUser.permissions.includes('recognition:manage') || canEditSettings;
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex">
@@ -547,7 +602,7 @@ export default function App() {
                   />
                   <span className="truncate">{label}</span>
                 </span>
-                {id === 'reports' && lowStockCount > 0 && (
+                {(id === 'reports' || id === 'stock') && lowStockCount > 0 && (
                   <span className="font-mono text-xs font-semibold text-amber-700 tabular-nums">
                     {lowStockCount}
                   </span>
@@ -631,7 +686,7 @@ export default function App() {
                     <Icon className="w-4 h-4" />
                     {label}
                   </span>
-                  {id === 'reports' && lowStockCount > 0 && (
+                  {(id === 'reports' || id === 'stock') && lowStockCount > 0 && (
                     <span className="font-mono text-xs font-semibold text-amber-700 tabular-nums">
                       {lowStockCount}
                     </span>
@@ -708,6 +763,7 @@ export default function App() {
                 onClick={() => {
                   setEditingProduct(null);
                   setPrefillBarcode(undefined);
+                  setAiPrefill(null);
                   setProductModalOpen(true);
                 }}
                 className="px-3.5 py-2 text-xs font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors whitespace-nowrap shrink-0"
@@ -777,12 +833,16 @@ export default function App() {
                       paymentMethods={storeData.paymentMethods ?? []}
                       heldTransactions={storeData.heldTransactions ?? []}
                       settings={storeData.settings}
+                      loyaltySettings={storeData.loyaltySettings}
                       canCreateProduct={canCreateProduct}
                       canApproveDiscount={canApproveDiscount}
                       canOverridePrice={canOverridePrice}
                       canHold={canHoldTransaction}
                       canResume={canResumeTransaction}
                       canCancel={canCancelTransaction}
+                      canUseAiRecognition={canUseAiRecognition}
+                      canManageAiRecognition={canManageAiRecognition}
+                      canEditProduct={canEditProduct}
                       resumedTransaction={resumedTransaction}
                       onConsumeResumedTransaction={() => setResumedTransaction(null)}
                       onCheckout={(payload) => executeCheckout(payload)}
@@ -792,9 +852,17 @@ export default function App() {
                       onCreateCustomer={handleCreateCustomer}
                       onOpenNewProductWithBarcode={(code) => {
                         setEditingProduct(null);
+                        setAiPrefill(null);
                         setPrefillBarcode(code);
                         setProductModalOpen(true);
                       }}
+                      onRegisterProductFromAi={(prefill) => {
+                        setEditingProduct(null);
+                        setPrefillBarcode(undefined);
+                        setAiPrefill(prefill);
+                        setProductModalOpen(true);
+                      }}
+                      onStoreUpdate={setStoreData}
                     />
                   )}
 
@@ -804,6 +872,19 @@ export default function App() {
                       stockMovements={storeData.stockMovements}
                       transactions={storeData.transactions.filter((t) => t.status === 'COMPLETED')}
                       onQuickRestock={(product) => setAdjustingProduct(product)}
+                      onViewStockCard={(productId) => setStockCardProductId(productId)}
+                    />
+                  )}
+
+                  {activeTab === 'stock' && (
+                    <StockControlView
+                      products={storeData.products}
+                      categories={storeData.categories}
+                      settings={storeData.settings}
+                      currentUser={currentUser}
+                      onStoreUpdate={setStoreData}
+                      onOpenStockCard={(productId) => setStockCardProductId(productId)}
+                      onRequestPinToken={requestStockPinToken}
                     />
                   )}
 
@@ -822,17 +903,20 @@ export default function App() {
                       onAddProduct={() => {
                         setEditingProduct(null);
                         setPrefillBarcode(undefined);
+                        setAiPrefill(null);
                         setProductModalOpen(true);
                       }}
                       onEditProduct={(product) => {
                         setEditingProduct(product);
                         setPrefillBarcode(undefined);
+                        setAiPrefill(null);
                         setProductModalOpen(true);
                       }}
                       onToggleProductStatus={handleToggleProductStatus}
                       onDeleteProduct={handleDeleteProduct}
                       onAdjustStock={(product) => setAdjustingProduct(product)}
                       onShowBarcode={(product) => setBarcodeProduct(product)}
+                      onViewStockCard={(product) => setStockCardProductId(product.id)}
                       onStoreUpdate={setStoreData}
                     />
                   )}
@@ -845,6 +929,30 @@ export default function App() {
                       onViewReceipt={(trx) => setReceiptTransaction(trx)}
                       onOpenReceiptDetail={(trx) => setActiveReceiptId(trx.id)}
                       onViewDetail={(trx) => setDetailTransaction(trx)}
+                    />
+                  )}
+
+                  {activeTab === 'customers' && (
+                    <CustomersView
+                      customers={storeData.customers ?? []}
+                      loyaltySettings={storeData.loyaltySettings}
+                      canCreate={canCreateCustomer}
+                      canEdit={canEditCustomer}
+                      onStoreUpdate={setStoreData}
+                      onViewTransaction={(trx) => setDetailTransaction(trx)}
+                    />
+                  )}
+
+                  {activeTab === 'promotions' && (
+                    <PromotionsView
+                      promotions={storeData.promotions ?? []}
+                      products={storeData.products}
+                      categories={storeData.categories}
+                      loyaltySettings={storeData.loyaltySettings}
+                      settings={storeData.settings}
+                      canManage={canManagePromotions}
+                      canEditSettings={canEditSettings}
+                      onStoreUpdate={setStoreData}
                     />
                   )}
 
@@ -879,11 +987,15 @@ export default function App() {
         open={productModalOpen}
         editingProduct={editingProduct}
         initialBarcode={prefillBarcode}
+        initialRecognitionPrefill={aiPrefill}
         categories={storeData?.categories ?? []}
         brands={storeData?.brands ?? []}
         uoms={storeData?.uoms ?? []}
         existingProducts={storeData?.products ?? []}
-        onClose={() => setProductModalOpen(false)}
+        onClose={() => {
+          setProductModalOpen(false);
+          setAiPrefill(null);
+        }}
         onSubmit={handleSaveProduct}
         onStoreUpdate={setStoreData}
       />
@@ -897,6 +1009,11 @@ export default function App() {
       <BarcodeLabelModal
         product={barcodeProduct}
         onClose={() => setBarcodeProduct(null)}
+      />
+
+      <StockCardModal
+        productId={stockCardProductId}
+        onClose={() => setStockCardProductId(null)}
       />
 
       {storeData && (

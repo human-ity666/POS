@@ -9,6 +9,7 @@ import {
   Download,
   Edit3,
   Eye,
+  FileSpreadsheet,
   Package,
   PackagePlus,
   Plus,
@@ -45,6 +46,7 @@ interface InventoryViewProps {
   onDeleteProduct: (product: Product) => Promise<void>;
   onAdjustStock: (product: Product) => void;
   onShowBarcode: (product: Product) => void;
+  onViewStockCard?: (product: Product) => void;
   onStoreUpdate: (store: StoreData) => void;
 }
 
@@ -68,6 +70,7 @@ export function InventoryView({
   onDeleteProduct,
   onAdjustStock,
   onShowBarcode,
+  onViewStockCard,
   onStoreUpdate,
 }: InventoryViewProps) {
   const [subTab, setSubTab] = useState<CatalogSubTab>('products');
@@ -591,6 +594,17 @@ export function InventoryView({
                               >
                                 <Eye className="w-3.5 h-3.5" />
                               </button>
+                              {onViewStockCard && (
+                                <button
+                                  type="button"
+                                  onClick={() => onViewStockCard(product)}
+                                  title="Lihat Kartu Stok"
+                                  className="p-1.5 text-teal-700 hover:text-teal-900 hover:bg-teal-50 rounded-md transition-colors"
+                                  aria-label={`Kartu Stok ${product.name}`}
+                                >
+                                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                                </button>
+                              )}
                               {canAdjustStock && (
                                 <button
                                   type="button"

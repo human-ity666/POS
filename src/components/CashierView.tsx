@@ -8,8 +8,11 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
 import {
+  Award,
   Camera,
   CameraOff,
+  ChevronDown,
+  ChevronUp,
   Clock,
   CreditCard,
   Edit3,
@@ -21,6 +24,8 @@ import {
   ScanBarcode,
   Search,
   ShoppingCart,
+  Sparkles,
+  Tag,
   Trash2,
   UserPlus,
   Users,
@@ -28,15 +33,25 @@ import {
 import type {
   Customer,
   DiscountMode,
+  LoyaltySettings,
   PaymentMethodConfig,
   PosCalculationPreview,
   Product,
+  StoreData,
   StoreSettings,
   Transaction,
 } from '../types';
 import { apiFetch } from '../utils/api';
 import { formatRupiah, playScannerSound } from '../utils/format';
-import { CameraScanner } from './CameraScanner';
+import {
+  validateAndNormalizeBarcode,
+  type ScanResultFeedback,
+} from '../utils/barcodeScanner';
+import {
+  AiRecognitionModal,
+  type RecognitionNewProductPrefill,
+} from './AiRecognitionModal';
+import { CameraScanner, type CameraScanEventMeta } from './CameraScanner';
 import { HeldTransactionsModal } from './HeldTransactionsModal';
 import { PaymentModal, type SubmittedPaymentLine } from './PaymentModal';
 
@@ -61,6 +76,8 @@ export interface CashierCheckoutPayload {
   }>;
   transactionDiscountType: DiscountMode;
   transactionDiscountValue: number;
+  selectedPromotionIds: string[];
+  loyaltyPointsToRedeem: number;
   applyTax: boolean;
   payments: SubmittedPaymentLine[];
   idempotencyKey: string;
@@ -72,12 +89,16 @@ interface CashierViewProps {
   paymentMethods: PaymentMethodConfig[];
   heldTransactions: Transaction[];
   settings: StoreSettings;
+  loyaltySettings: LoyaltySettings;
   canCreateProduct: boolean;
   canApproveDiscount: boolean;
   canOverridePrice: boolean;
   canHold: boolean;
   canResume: boolean;
   canCancel: boolean;
+  canUseAiRecognition?: boolean;
+  canManageAiRecognition?: boolean;
+  canEditProduct?: boolean;
   resumedTransaction?: Transaction | null;
   onConsumeResumedTransaction?: () => void;
   onCheckout: (payload: CashierCheckoutPayload) => Promise<void>;
@@ -88,12 +109,16 @@ interface CashierViewProps {
     items: CashierCheckoutPayload['items'];
     transactionDiscountType: DiscountMode;
     transactionDiscountValue: number;
+    selectedPromotionIds?: string[];
+    loyaltyPointsToRedeem?: number;
     applyTax: boolean;
   }) => Promise<Transaction>;
   onResumeHeldTransaction: (trx: Transaction) => Promise<Transaction>;
   onCancelTransaction: (trx: Transaction, reason?: string) => Promise<void>;
   onCreateCustomer: (input: { name: string; phone?: string }) => Promise<Customer>;
   onOpenNewProductWithBarcode: (barcode: string) => void;
+  onRegisterProductFromAi?: (prefill: RecognitionNewProductPrefill) => void;
+  onStoreUpdate?: (store: StoreData) => void;
 }
 
 export function CashierView({
@@ -102,12 +127,16 @@ export function CashierView({
   paymentMethods,
   heldTransactions,
   settings,
+  loyaltySettings,
   canCreateProduct,
   canApproveDiscount,
   canOverridePrice,
   canHold,
   canResume,
   canCancel,
+  canUseAiRecognition = true,
+  canManageAiRecognition = false,
+  canEditProduct = false,
   resumedTransaction,
   onConsumeResumedTransaction,
   onCheckout,
@@ -116,6 +145,8 @@ export function CashierView({
   onCancelTransaction,
   onCreateCustomer,
   onOpenNewProductWithBarcode,
+  onRegisterProductFromAi,
+  onStoreUpdate,
 }: CashierViewProps) {
   const [mobilePane, setMobilePane] = useState<'catalog' | 'cart'>('catalog');
   const [cameraActive, setCameraActive] = useState(false);
@@ -135,6 +166,9 @@ export function CashierView({
   const [notes, setNotes] = useState('');
   const [txDiscountType, setTxDiscountType] = useState<DiscountMode>('AMOUNT');
   const [txDiscountInput, setTxDiscountInput] = useState('');
+  const [selectedPromotionIds, setSelectedPromotionIds] = useState<string[]>([]);
+  const [loyaltyPointsInput, setLoyaltyPointsInput] = useState('');
+  const [promoPanelOpen, setPromoPanelOpen] = useState(true);
   const [applyTax, setApplyTax] = useState(settings.taxEnabled);
 
   // Authoritative backend price preview
@@ -151,19 +185,14 @@ export function CashierView({
   // Modals
   const [paymentModalOpen, setPaymentModalOpen] = useState(false);
   const [heldModalOpen, setHeldModalOpen] = useState(false);
+  const [aiModalOpen, setAiModalOpen] = useState(false);
   const [isHolding, setIsHolding] = useState(false);
   const [bannerMessage, setBannerMessage] = useState<{
     type: 'success' | 'error';
     text: string;
   } | null>(null);
 
-  const [lastScanStatus, setLastScanStatus] = useState<{
-    barcode: string;
-    productName?: string;
-    found: boolean;
-    message: string;
-    timestamp: number;
-  } | null>(null);
+  const [lastScanStatus, setLastScanStatus] = useState<ScanResultFeedback | null>(null);
 
   const barcodeInputRef = useRef<HTMLInputElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
@@ -211,6 +240,12 @@ export function CashierView({
       setTxDiscountInput(
         trx.transactionDiscountValue > 0 ? String(trx.transactionDiscountValue) : ''
       );
+      setSelectedPromotionIds(trx.appliedPromotions?.map((p) => p.id) ?? []);
+      setLoyaltyPointsInput(
+        trx.loyaltyPointsRedeemed && trx.loyaltyPointsRedeemed > 0
+          ? String(trx.loyaltyPointsRedeemed)
+          : ''
+      );
       setApplyTax(trx.applyTax);
       setBannerMessage({
         type: 'success',
@@ -253,6 +288,8 @@ export function CashierView({
     setNotes('');
     setTxDiscountType('AMOUNT');
     setTxDiscountInput('');
+    setSelectedPromotionIds([]);
+    setLoyaltyPointsInput('');
     setApplyTax(settings.taxEnabled);
     setCalcPreview(null);
     setCalcError(null);
@@ -260,7 +297,12 @@ export function CashierView({
 
   const serializedCartPayload = useMemo(() => {
     const rawTxDisc = Number(txDiscountInput || 0);
+    const parsedPoints =
+      customerId && loyaltySettings.enabled
+        ? Math.max(0, Math.trunc(Number(loyaltyPointsInput || 0)))
+        : 0;
     return {
+      customerId: customerId || null,
       items: cart.map((c) => ({
         productId: c.product.id,
         qty: c.qty,
@@ -270,9 +312,20 @@ export function CashierView({
       })),
       transactionDiscountType: txDiscountType,
       transactionDiscountValue: Number.isFinite(rawTxDisc) && rawTxDisc >= 0 ? rawTxDisc : 0,
+      selectedPromotionIds,
+      loyaltyPointsToRedeem: Number.isFinite(parsedPoints) ? parsedPoints : 0,
       applyTax,
     };
-  }, [cart, txDiscountType, txDiscountInput, applyTax]);
+  }, [
+    cart,
+    customerId,
+    txDiscountType,
+    txDiscountInput,
+    selectedPromotionIds,
+    loyaltyPointsInput,
+    loyaltySettings.enabled,
+    applyTax,
+  ]);
 
   // Authoritative backend calculation preview
   useEffect(() => {
@@ -313,12 +366,15 @@ export function CashierView({
   }, [cart.length, serializedCartPayload]);
 
   const addProductToCart = useCallback(
-    (product: Product, fromScanner = false): boolean => {
+    (product: Product, fromScanner = false, scanMeta?: CameraScanEventMeta): boolean => {
       if (product.status === 'INACTIVE') {
         if (fromScanner && soundEnabled) playScannerSound('error');
         setLastScanStatus({
           barcode: product.barcode,
+          format: scanMeta?.format,
+          engine: scanMeta?.engine === 'manual' ? undefined : scanMeta?.engine,
           productName: product.name,
+          productSku: product.sku,
           found: false,
           message: 'Produk berstatus nonaktif dan tidak dapat dijual.',
           timestamp: Date.now(),
@@ -329,7 +385,10 @@ export function CashierView({
         if (fromScanner && soundEnabled) playScannerSound('error');
         setLastScanStatus({
           barcode: product.barcode,
+          format: scanMeta?.format,
+          engine: scanMeta?.engine === 'manual' ? undefined : scanMeta?.engine,
           productName: product.name,
+          productSku: product.sku,
           found: false,
           message: `Stok habis (0 ${product.unit}) — tidak bisa ditambahkan.`,
           timestamp: Date.now(),
@@ -365,7 +424,10 @@ export function CashierView({
         if (fromScanner && soundEnabled) playScannerSound('error');
         setLastScanStatus({
           barcode: product.barcode,
+          format: scanMeta?.format,
+          engine: scanMeta?.engine === 'manual' ? undefined : scanMeta?.engine,
           productName: product.name,
+          productSku: product.sku,
           found: false,
           message: `Batas stok tercapai (tersedia ${product.stock} ${product.unit}).`,
           timestamp: Date.now(),
@@ -377,7 +439,13 @@ export function CashierView({
       if (fromScanner && soundEnabled) playScannerSound('success');
       setLastScanStatus({
         barcode: product.barcode,
+        format: scanMeta?.format,
+        engine: scanMeta?.engine === 'manual' ? undefined : scanMeta?.engine,
         productName: product.name,
+        productSku: product.sku,
+        productPrice: effectivePrice,
+        productStock: product.stock,
+        productUnit: product.unit,
         found: true,
         message: `${formatRupiah(effectivePrice)} · Masuk keranjang (+1 ${product.unit})`,
         timestamp: Date.now(),
@@ -388,27 +456,65 @@ export function CashierView({
   );
 
   const handleBarcodeLookup = useCallback(
-    (rawCode: string) => {
-      const code = rawCode.trim();
-      if (!code) return;
+    async (rawCode: string, scanMeta?: CameraScanEventMeta) => {
+      const validated = validateAndNormalizeBarcode(rawCode, scanMeta?.format, {
+        allowQr: true,
+      });
+      if (!validated.valid) {
+        if (soundEnabled) playScannerSound('error');
+        setLastScanStatus({
+          barcode: rawCode.trim(),
+          format: validated.detectedType,
+          found: false,
+          validationError: true,
+          message: validated.reason || 'Format barcode tidak valid.',
+          timestamp: Date.now(),
+        });
+        return;
+      }
+
+      const code = validated.code;
       const lower = code.toLowerCase();
-      const found = products.find(
+      let found: Product | undefined = products.find(
         (p) =>
           p.barcode.toLowerCase() === lower ||
           (p.sku && p.sku.toLowerCase() === lower) ||
           (p.barcodes && p.barcodes.some((b) => b.barcode.toLowerCase() === lower))
       );
+
+      // Fallback lookup against backend product database if not matched locally
+      if (!found) {
+        try {
+          const remote = await apiFetch<{ product: Product }>(
+            `/api/products/barcode/${encodeURIComponent(code)}`
+          );
+          if (remote?.product) {
+            found = remote.product;
+          }
+        } catch {
+          // 404 or network fallback handled cleanly below as unknown barcode
+        }
+      }
+
       if (!found) {
         if (soundEnabled) playScannerSound('error');
         setLastScanStatus({
           barcode: code,
+          format: scanMeta?.format ?? validated.detectedType,
+          engine: scanMeta?.engine === 'manual' ? undefined : scanMeta?.engine,
           found: false,
-          message: 'Barcode belum terdaftar di katalog.',
+          unknownBarcode: true,
+          message: 'Barcode belum terdaftar di database produk.',
           timestamp: Date.now(),
         });
         return;
       }
-      addProductToCart(found, true);
+
+      addProductToCart(found, true, {
+        format: scanMeta?.format ?? validated.detectedType,
+        engine: scanMeta?.engine ?? 'manual',
+        checkDigitValid: validated.checkDigitValid,
+      });
     },
     [products, addProductToCart, soundEnabled]
   );
@@ -516,10 +622,35 @@ export function CashierView({
     }
   };
 
-  const selectedCustomerName = useMemo(() => {
-    if (!customerId) return 'Pelanggan Umum';
-    return customers.find((c) => c.id === customerId)?.name ?? 'Pelanggan Umum';
-  }, [customerId, customers]);
+  const selectedCustomer = useMemo(
+    () => (customerId ? customers.find((c) => c.id === customerId) ?? null : null),
+    [customerId, customers]
+  );
+
+  const selectedCustomerName = selectedCustomer?.name ?? 'Pelanggan Umum';
+
+  const handleTogglePromotion = (promoId: string) => {
+    setSelectedPromotionIds((prev) =>
+      prev.includes(promoId) ? prev.filter((id) => id !== promoId) : [...prev, promoId]
+    );
+  };
+
+  const handleApplyMaxLoyaltyPoints = () => {
+    if (!selectedCustomer || !loyaltySettings.enabled) return;
+    const baseNet = Math.max(
+      0,
+      (calcPreview?.netAfterLineDiscounts ?? 0) -
+        (calcPreview?.transactionDiscountAmount ?? 0) -
+        (calcPreview?.promotionTransactionDiscountAmount ?? 0)
+    );
+    const maxValueAllowed = Math.floor((baseNet * loyaltySettings.maxRedeemPercent) / 100);
+    const maxPointsByCap =
+      loyaltySettings.pointValueRp > 0
+        ? Math.floor(maxValueAllowed / loyaltySettings.pointValueRp)
+        : 0;
+    const optimal = Math.min(selectedCustomer.loyaltyPoints, maxPointsByCap);
+    setLoyaltyPointsInput(optimal > 0 ? String(optimal) : '');
+  };
 
   const handleCreateQuickCustomer = async (e: FormEvent) => {
     e.preventDefault();
@@ -531,6 +662,7 @@ export function CashierView({
         phone: newCustPhone.trim(),
       });
       setCustomerId(created.id);
+      setLoyaltyPointsInput('');
       setNewCustName('');
       setNewCustPhone('');
       setQuickCustOpen(false);
@@ -546,7 +678,6 @@ export function CashierView({
     try {
       const held = await onHoldTransaction({
         heldTransactionId: activeDraftId,
-        customerId: customerId || null,
         notes: notes.trim(),
         ...serializedCartPayload,
       });
@@ -608,7 +739,10 @@ export function CashierView({
         </button>
         <button
           type="button"
-          onClick={() => setMobilePane('cart')}
+          onClick={() => {
+            setMobilePane('cart');
+            setCameraActive(false);
+          }}
           className={`min-h-[44px] rounded-lg text-xs font-semibold transition-colors tabular-nums ${
             mobilePane === 'cart'
               ? 'bg-teal-700 text-white'
@@ -699,6 +833,20 @@ export function CashierView({
                     </>
                   )}
                 </button>
+
+                {canUseAiRecognition && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCameraActive(false);
+                      setAiModalOpen(true);
+                    }}
+                    className="min-h-[40px] inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-teal-900 bg-teal-50 border border-teal-200 hover:bg-teal-100 rounded-lg transition-colors whitespace-nowrap"
+                  >
+                    <Sparkles className="w-4 h-4 text-teal-700" />
+                    Identifikasi AI
+                  </button>
+                )}
               </div>
             </div>
 
@@ -719,7 +867,7 @@ export function CashierView({
                     {lastScanStatus.productName || lastScanStatus.message}
                   </span>
                 </div>
-                {!lastScanStatus.found && canCreateProduct && (
+                {!lastScanStatus.found && lastScanStatus.unknownBarcode && canCreateProduct && (
                   <button
                     type="button"
                     onClick={() => onOpenNewProductWithBarcode(lastScanStatus.barcode)}
@@ -741,6 +889,8 @@ export function CashierView({
             lastScanStatus={lastScanStatus}
             sampleProducts={activeProducts.filter((p) => p.stock > 0)}
             onRegisterMissingBarcode={canCreateProduct ? onOpenNewProductWithBarcode : undefined}
+            context="pos"
+            allowQrDefault={false}
           />
 
           {/* Fast Product Search (Autocomplete + Keyboard Nav) & Category Grid */}
@@ -964,7 +1114,11 @@ export function CashierView({
               <Users className="w-3.5 h-3.5 text-slate-400 shrink-0" />
               <select
                 value={customerId}
-                onChange={(e) => setCustomerId(e.target.value)}
+                onChange={(e) => {
+                  const nextId = e.target.value;
+                  setCustomerId(nextId);
+                  if (!nextId) setLoyaltyPointsInput('');
+                }}
                 aria-label="Pilih pelanggan"
                 className="flex-1 text-xs px-2.5 py-1.5 border border-slate-300 rounded-lg bg-white"
               >
@@ -974,6 +1128,7 @@ export function CashierView({
                   .map((c) => (
                     <option key={c.id} value={c.id}>
                       {c.name}
+                      {c.membershipNumber ? ` (${c.membershipNumber})` : ''}
                       {c.phone ? ` · ${c.phone}` : ''}
                     </option>
                   ))}
@@ -988,6 +1143,15 @@ export function CashierView({
                 <UserPlus className="w-3.5 h-3.5" />
               </button>
             </div>
+
+            {selectedCustomer && (
+              <div className="flex items-center justify-between text-[11px] text-teal-800 font-mono tabular-nums px-1">
+                <span>Member {selectedCustomer.membershipNumber}</span>
+                <span className="font-semibold">
+                  {selectedCustomer.loyaltyPoints.toLocaleString('id-ID')} poin
+                </span>
+              </div>
+            )}
 
             {quickCustOpen && (
               <form
@@ -1057,6 +1221,12 @@ export function CashierView({
                           {(serverLine?.lineDiscountAmount ?? 0) > 0 && (
                             <span className="text-rose-700 font-medium">
                               · Diskon -{formatRupiah(serverLine?.lineDiscountAmount ?? 0)}
+                            </span>
+                          )}
+                          {(serverLine?.promotionDiscountAmount ?? 0) > 0 && (
+                            <span className="text-teal-700 font-medium">
+                              · {serverLine?.promotionName || 'Promo'} -
+                              {formatRupiah(serverLine?.promotionDiscountAmount ?? 0)}
                             </span>
                           )}
                         </div>
@@ -1238,6 +1408,116 @@ export function CashierView({
               className="w-full text-xs px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-600"
             />
 
+            {/* Phase 09: Promotion Selector */}
+            {cart.length > 0 && (calcPreview?.eligiblePromotions?.length ?? 0) > 0 && (
+              <div className="border border-slate-200 bg-white rounded-lg overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setPromoPanelOpen((o) => !o)}
+                  className="w-full px-3 py-2 flex items-center justify-between text-xs font-semibold text-slate-800 hover:bg-slate-50"
+                >
+                  <span className="inline-flex items-center gap-1.5">
+                    <Tag className="w-3.5 h-3.5 text-teal-700" />
+                    Promosi (
+                    {calcPreview?.eligiblePromotions.filter((p) => p.eligible).length ?? 0}{' '}
+                    memenuhi syarat)
+                  </span>
+                  <span className="inline-flex items-center gap-1 font-mono text-[11px] text-teal-800">
+                    {selectedPromotionIds.length > 0
+                      ? `${selectedPromotionIds.length} dipilih`
+                      : 'Pilih'}
+                    {promoPanelOpen ? (
+                      <ChevronUp className="w-3.5 h-3.5" />
+                    ) : (
+                      <ChevronDown className="w-3.5 h-3.5" />
+                    )}
+                  </span>
+                </button>
+
+                {promoPanelOpen && (
+                  <div className="border-t border-slate-100 divide-y divide-slate-100 max-h-40 overflow-y-auto">
+                    {calcPreview?.eligiblePromotions.map((item) => {
+                      const checked = selectedPromotionIds.includes(item.promotion.id);
+                      const disabled = !item.eligible && !checked;
+                      return (
+                        <label
+                          key={item.promotion.id}
+                          className={`px-3 py-2 flex items-start justify-between gap-2 text-[11px] cursor-pointer ${
+                            disabled ? 'opacity-55 cursor-not-allowed' : 'hover:bg-slate-50'
+                          }`}
+                        >
+                          <span className="flex items-start gap-2 min-w-0">
+                            <input
+                              type="checkbox"
+                              disabled={disabled}
+                              checked={checked}
+                              onChange={() => handleTogglePromotion(item.promotion.id)}
+                              className="mt-0.5 rounded border-slate-300 text-teal-700 focus:ring-teal-600"
+                            />
+                            <span className="min-w-0">
+                              <span className="font-mono font-bold text-slate-800 mr-1">
+                                {item.promotion.code}
+                              </span>
+                              <span className="font-medium text-slate-700">
+                                {item.promotion.name}
+                              </span>
+                              {!item.eligible && item.reason && (
+                                <span className="block text-[10px] text-slate-500 mt-0.5">
+                                  {item.reason}
+                                </span>
+                              )}
+                            </span>
+                          </span>
+                          {item.eligible && item.estimatedDiscount > 0 && (
+                            <span className="font-mono font-semibold text-teal-700 whitespace-nowrap shrink-0">
+                              -{formatRupiah(item.estimatedDiscount)}
+                            </span>
+                          )}
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Phase 09: Loyalty Points Redemption */}
+            {cart.length > 0 &&
+              selectedCustomer &&
+              loyaltySettings.enabled &&
+              selectedCustomer.loyaltyPoints >= loyaltySettings.minRedeemPoints && (
+                <div className="p-2.5 bg-white border border-slate-200 rounded-lg space-y-1.5 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="inline-flex items-center gap-1 font-semibold text-slate-800 text-[11px]">
+                      <Award className="w-3.5 h-3.5 text-teal-700" />
+                      Tukar Poin Loyalitas
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleApplyMaxLoyaltyPoints}
+                      className="text-[11px] font-semibold text-teal-800 hover:underline"
+                    >
+                      Tukar Maks
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={0}
+                      max={selectedCustomer.loyaltyPoints}
+                      value={loyaltyPointsInput}
+                      onChange={(e) => setLoyaltyPointsInput(e.target.value)}
+                      placeholder={`Min ${loyaltySettings.minRedeemPoints} poin`}
+                      aria-label="Jumlah poin ditukar"
+                      className="flex-1 font-mono text-xs px-2.5 py-1.5 border border-slate-300 rounded-md tabular-nums"
+                    />
+                    <span className="font-mono text-[11px] text-slate-500 whitespace-nowrap">
+                      1 poin = {formatRupiah(loyaltySettings.pointValueRp)}
+                    </span>
+                  </div>
+                </div>
+              )}
+
             <div className="space-y-1.5 text-xs pt-2 border-t border-slate-200 tabular-nums">
               <div className="flex justify-between text-slate-600">
                 <span>Subtotal ({totalUnits} unit)</span>
@@ -1251,6 +1531,14 @@ export function CashierView({
                   </span>
                 </div>
               )}
+              {(calcPreview?.totalPromotionDiscount ?? 0) > 0 && (
+                <div className="flex justify-between text-teal-700">
+                  <span>Diskon Promosi ({calcPreview?.appliedPromotions.length ?? 0})</span>
+                  <span className="font-mono">
+                    -{formatRupiah(calcPreview?.totalPromotionDiscount ?? 0)}
+                  </span>
+                </div>
+              )}
               {(calcPreview?.transactionDiscountAmount ?? 0) > 0 && (
                 <div className="flex justify-between text-rose-700">
                   <span>Diskon Transaksi</span>
@@ -1259,10 +1547,26 @@ export function CashierView({
                   </span>
                 </div>
               )}
+              {(calcPreview?.loyaltyDiscountAmount ?? 0) > 0 && (
+                <div className="flex justify-between text-teal-700">
+                  <span>Tukar Poin ({calcPreview?.loyaltyPointsRedeemed ?? 0} poin)</span>
+                  <span className="font-mono">
+                    -{formatRupiah(calcPreview?.loyaltyDiscountAmount ?? 0)}
+                  </span>
+                </div>
+              )}
               {(calcPreview?.taxAmount ?? 0) > 0 && (
                 <div className="flex justify-between text-slate-600">
                   <span>PPN ({settings.taxRate}%)</span>
                   <span className="font-mono">{formatRupiah(calcPreview?.taxAmount ?? 0)}</span>
+                </div>
+              )}
+              {(calcPreview?.estimatedPointsEarned ?? 0) > 0 && (
+                <div className="flex justify-between text-emerald-700 text-[11px]">
+                  <span>Estimasi Poin Didapat</span>
+                  <span className="font-mono font-semibold">
+                    +{calcPreview?.estimatedPointsEarned ?? 0} poin
+                  </span>
                 </div>
               )}
               <div className="flex justify-between items-baseline pt-2 border-t border-slate-200">
@@ -1352,7 +1656,6 @@ export function CashierView({
         onConfirmPayment={async ({ payments, idempotencyKey }) => {
           await onCheckout({
             heldTransactionId: activeDraftId,
-            customerId: customerId || null,
             notes: notes.trim(),
             ...serializedCartPayload,
             payments,
@@ -1377,6 +1680,39 @@ export function CashierView({
         onCancelHeld={async (trx, reason) => {
           await onCancelTransaction(trx, reason);
         }}
+      />
+
+      {/* Phase 08 AI Product Recognition Modal */}
+      <AiRecognitionModal
+        open={aiModalOpen}
+        products={activeProducts}
+        canManageAi={canManageAiRecognition}
+        canCreateProduct={canCreateProduct}
+        canEditProduct={canEditProduct}
+        onClose={() => setAiModalOpen(false)}
+        onAddProductToCart={(product, sourceLabel) => {
+          const added = addProductToCart(product, false);
+          if (added) {
+            if (soundEnabled) playScannerSound('success');
+            setBannerMessage({
+              type: 'success',
+              text: `${product.name} ditambahkan ke keranjang via ${sourceLabel}.`,
+            });
+          }
+        }}
+        onSwitchToBarcodeScanner={() => setCameraActive(true)}
+        onSwitchToManualSearch={(initialQuery) => {
+          setMobilePane('catalog');
+          if (initialQuery) {
+            setSearchQuery(initialQuery);
+            setSearchDropdownOpen(true);
+          }
+          window.setTimeout(() => searchInputRef.current?.focus(), 60);
+        }}
+        onRegisterNewProduct={(prefill) => {
+          onRegisterProductFromAi?.(prefill);
+        }}
+        onStoreUpdate={onStoreUpdate}
       />
     </div>
   );

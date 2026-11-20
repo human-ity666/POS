@@ -323,6 +323,14 @@ export function PaymentModal({
                 <span className="font-mono">-{formatRupiah(preview?.lineDiscountTotal ?? 0)}</span>
               </div>
             )}
+            {(preview?.totalPromotionDiscount ?? 0) > 0 && (
+              <div className="flex justify-between text-teal-700">
+                <span>Diskon Promosi ({preview?.appliedPromotions.length ?? 0})</span>
+                <span className="font-mono">
+                  -{formatRupiah(preview?.totalPromotionDiscount ?? 0)}
+                </span>
+              </div>
+            )}
             {(preview?.transactionDiscountAmount ?? 0) > 0 && (
               <div className="flex justify-between text-rose-700">
                 <span>Diskon Transaksi</span>
@@ -331,10 +339,26 @@ export function PaymentModal({
                 </span>
               </div>
             )}
+            {(preview?.loyaltyDiscountAmount ?? 0) > 0 && (
+              <div className="flex justify-between text-teal-700">
+                <span>Tukar Poin Loyalitas ({preview?.loyaltyPointsRedeemed ?? 0} poin)</span>
+                <span className="font-mono">
+                  -{formatRupiah(preview?.loyaltyDiscountAmount ?? 0)}
+                </span>
+              </div>
+            )}
             {(preview?.taxAmount ?? 0) > 0 && (
               <div className="flex justify-between text-slate-600">
                 <span>PPN</span>
                 <span className="font-mono">{formatRupiah(preview?.taxAmount ?? 0)}</span>
+              </div>
+            )}
+            {(preview?.estimatedPointsEarned ?? 0) > 0 && (
+              <div className="flex justify-between text-emerald-700 text-[11px]">
+                <span>Estimasi Poin Member Didapat</span>
+                <span className="font-mono font-semibold">
+                  +{preview?.estimatedPointsEarned ?? 0} poin
+                </span>
               </div>
             )}
             <div className="flex items-baseline justify-between pt-2 border-t border-slate-200">

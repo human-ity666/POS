@@ -8,6 +8,7 @@ interface StockReportViewProps {
   stockMovements: StockMovement[];
   transactions: Transaction[];
   onQuickRestock: (product: Product) => void;
+  onViewStockCard?: (productId: string) => void;
 }
 
 export function StockReportView({
@@ -15,6 +16,7 @@ export function StockReportView({
   stockMovements,
   transactions,
   onQuickRestock,
+  onViewStockCard,
 }: StockReportViewProps) {
   const [activeSubTab, setActiveSubTab] = useState<'alerts' | 'movements' | 'valuation'>('alerts');
   const [movementTypeFilter, setMovementTypeFilter] = useState<'ALL' | StockMovementType>('ALL');
@@ -142,8 +144,14 @@ export function StockReportView({
     switch (type) {
       case 'PENJUALAN':
         return 'Penjualan Kasir';
+      case 'STOCK_IN':
+        return 'Barang Masuk';
       case 'RESTOK':
         return 'Restok Masuk';
+      case 'ADJUSTMENT_IN':
+        return 'Penyesuaian (+)';
+      case 'ADJUSTMENT_OUT':
+        return 'Penyesuaian (-)';
       case 'OPNAME':
         return 'Stok Opname';
       case 'STOK_AWAL':
@@ -321,15 +329,26 @@ export function StockReportView({
                         <td className="py-3 px-4 text-right font-mono text-slate-700 tabular-nums">
                           {formatRupiah(estCost)}
                         </td>
-                        <td className="py-3 px-4 text-right">
-                          <button
-                            type="button"
-                            onClick={() => onQuickRestock(item)}
-                            className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 rounded-lg transition-colors whitespace-nowrap"
-                          >
-                            <ArrowUpDown className="w-3.5 h-3.5" />
-                            Restok Cepat
-                          </button>
+                        <td className="py-3 px-4 text-right whitespace-nowrap">
+                          <div className="inline-flex items-center gap-1.5">
+                            {onViewStockCard && (
+                              <button
+                                type="button"
+                                onClick={() => onViewStockCard(item.id)}
+                                className="px-2.5 py-1.5 text-xs font-semibold text-teal-800 bg-teal-50 hover:bg-teal-100 rounded-lg transition-colors whitespace-nowrap"
+                              >
+                                Kartu Stok
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => onQuickRestock(item)}
+                              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 rounded-lg transition-colors whitespace-nowrap"
+                            >
+                              <ArrowUpDown className="w-3.5 h-3.5" />
+                              Restok Cepat
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -350,7 +369,10 @@ export function StockReportView({
                 [
                   { id: 'ALL', label: 'Semua Mutasi' },
                   { id: 'PENJUALAN', label: 'Penjualan (-)' },
+                  { id: 'STOCK_IN', label: 'Barang Masuk (+)' },
                   { id: 'RESTOK', label: 'Restok (+)' },
+                  { id: 'ADJUSTMENT_IN', label: 'Adj (+)' },
+                  { id: 'ADJUSTMENT_OUT', label: 'Adj (-)' },
                   { id: 'OPNAME', label: 'Opname' },
                 ] as const
               ).map((f) => (
@@ -411,7 +433,17 @@ export function StockReportView({
                         {mov.referenceId}
                       </td>
                       <td className="py-3 px-4">
-                        <p className="font-semibold text-slate-900">{mov.productName}</p>
+                        {onViewStockCard ? (
+                          <button
+                            type="button"
+                            onClick={() => onViewStockCard(mov.productId)}
+                            className="font-semibold text-slate-900 hover:text-teal-700 text-left"
+                          >
+                            {mov.productName}
+                          </button>
+                        ) : (
+                          <p className="font-semibold text-slate-900">{mov.productName}</p>
+                        )}
                         <p className="font-mono text-[11px] text-slate-500 tabular-nums">
                           {mov.barcode}
                         </p>
@@ -419,9 +451,9 @@ export function StockReportView({
                       <td className="py-3 px-4 whitespace-nowrap">
                         <span
                           className={`font-semibold ${
-                            mov.type === 'PENJUALAN'
+                            mov.qtyDelta < 0
                               ? 'text-rose-700'
-                              : mov.type === 'RESTOK' || mov.type === 'STOK_AWAL'
+                              : mov.qtyDelta > 0
                               ? 'text-emerald-700'
                               : 'text-amber-700'
                           }`}

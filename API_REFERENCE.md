@@ -11,6 +11,7 @@ Semua endpoint berada di bawah prefix `/api`. Kecuali ditandai sebagai **Publik*
 | `GET` | `/api/health` | Publik | Health check status server (`{ ok: true }`). |
 | `GET` | `/api/uploads/products/:fileName` | Publik (file valid) | Mengirim gambar produk yang tersimpan di disk (`POS_UPLOADS_DIR`) dengan perlindungan path traversal. |
 | `GET` | `/api/uploads/store/:fileName` | Publik (file valid) | Mengirim logo toko untuk struk yang tersimpan di disk (`POS_STORE_UPLOADS_DIR`) dengan perlindungan path traversal. |
+| `GET` | `/api/uploads/recognition/:fileName` | Publik (file valid) | Mengirim gambar tangkapan identifikasi AI (`POS_RECOGNITION_UPLOADS_DIR`) dengan perlindungan path traversal. |
 | `GET` | `/api/receipts/public/:id` | Publik (Token QR valid) | Mengambil struk digital resmi menggunakan query `?token=<verificationToken>` (validasi `timingSafeEqual`; `403` jika token tidak cocok, `409` jika transaksi belum `COMPLETED`). |
 
 ---
@@ -101,15 +102,15 @@ Semua endpoint berada di bawah prefix `/api`. Kecuali ditandai sebagai **Publik*
 | `GET` | `/api/payment-methods` | `pos:view` / `transactions:view` / `settings:edit` | Daftar metode pembayaran (`?includeInactive=true`). Default: `Tunai`, `Kartu Debit`, `Kartu Kredit`, `QRIS`, `Transfer Bank`. |
 | `POST` | `/api/payment-methods` | `settings:edit` | Menambah metode pembayaran kustom `{ name, code?, type, requiresReference? }`. |
 | `PATCH` | `/api/payment-methods/:id/status` | `settings:edit` | Mengaktifkan/menonaktifkan metode pembayaran `{ isActive: boolean }` (`Tunai` bawaan tidak dapat dinonaktifkan). |
-| `POST` | `/api/pos/calculate` | `pos:view` / `pos:create` | Menghitung total keranjang secara otoritatif di server menggunakan aritmetika `BigInt` (zero float): `{ items: [{ productId, qty, overrideUnitPrice?, lineDiscountType?, lineDiscountValue? }], transactionDiscountType?, transactionDiscountValue?, applyTax? }`. |
+| `POST` | `/api/pos/calculate` | `pos:view` / `pos:create` | Menghitung total keranjang secara otoritatif di server menggunakan aritmetika `BigInt` (zero float): `{ customerId?, items: [{ productId, qty, overrideUnitPrice?, lineDiscountType?, lineDiscountValue? }], transactionDiscountType?, transactionDiscountValue?, selectedPromotionIds?, loyaltyPointsToRedeem?, applyTax? }`. Mengembalikan subtotal, diskon baris, diskon promosi per baris & transaksi, potongan poin loyalitas, estimasi poin didapat, daftar `eligiblePromotions[]`, pajak PPN, dan grand total. |
 | `GET` | `/api/transactions` | `transactions:view` / `pos:view` | Daftar transaksi terpaginasi dengan filter `search`, `status`, `paymentStatus`, `paymentMethod`, `dateFrom`, `dateTo`, `page`, `pageSize`. |
 | `GET` | `/api/transactions/held` | `pos:view` / `pos:hold` / `pos:resume` | Daftar transaksi berstatus `HELD`. |
-| `GET` | `/api/transactions/:id` | `transactions:view` / `pos:view` | Detail lengkap transaksi (item, diskon baris, override harga, rincian `payments[]`, catatan, pelanggan). |
-| `POST` | `/api/transactions/hold` | `pos:hold` | Menahan/memperbarui draft keranjang menjadi `HELD` (`HOLD-YYYYMMDD-XXXX`) tanpa memotong stok. |
+| `GET` | `/api/transactions/:id` | `transactions:view` / `pos:view` | Detail lengkap transaksi (item, diskon baris/promo, override harga, rincian `payments[]`, poin loyalitas, catatan, pelanggan). |
+| `POST` | `/api/transactions/hold` | `pos:hold` | Menahan/memperbarui draft keranjang menjadi `HELD` (`HOLD-YYYYMMDD-XXXX`) tanpa memotong stok atau poin. |
 | `POST` | `/api/transactions/:id/resume` | `pos:resume` | Mengubah status transaksi `HELD` menjadi `IN_PROGRESS` untuk dilanjutkan di kasir. |
 | `POST` | `/api/transactions/:id/cancel` | `pos:cancel` | Membatalkan transaksi `HELD`/`IN_PROGRESS` menjadi `CANCELLED` `{ reason? }`. Menolak `COMPLETED` (`409`). |
 | `DELETE` | `/api/transactions/:id` | `pos:cancel` | Membatalkan draft/hold; **selalu menolak** transaksi `COMPLETED` dengan `409 Conflict` (tidak boleh dihapus secara fisik). |
-| `POST` | `/api/transactions` | `pos:create` (+ `pos:discount_approve` / `pos:price_override` atau token PIN) | Checkout atomik 14 langkah dengan dukungan `idempotencyKey` (`201` saat dibuat baru, `200` + `idempotentReplay: true` jika kunci sama dikirim ulang), single payment atau `payments[]` split/multi-metode, pemotongan stok, `stock_movements`, capture `receipt_snapshots`, dan audit log. |
+| `POST` | `/api/transactions` | `pos:create` (+ `pos:discount_approve` / `pos:price_override` atau token PIN) | Checkout atomik dengan dukungan `idempotencyKey` (`201` saat dibuat baru, `200` + `idempotentReplay: true` jika kunci sama dikirim ulang), single/split payment, evaluasi & pencatatan pemakaian promosi (`selectedPromotionIds`), penukaran & perolehan poin loyalitas (`loyaltyPointsToRedeem`), pemotongan stok, `stock_movements`, capture `receipt_snapshots`, dan audit log. |
 
 ---
 
@@ -122,13 +123,72 @@ Semua endpoint berada di bawah prefix `/api`. Kecuali ditandai sebagai **Publik*
 
 ---
 
-## 8. Operasional Stok, Bootstrap & Pengaturan Toko & Logo
+## 8. Kontrol Stok, Barang Masuk, Penyesuaian, Stok Opname & Kartu Stok (Phase 06)
+
+| Method | Endpoint | Izin | Deskripsi & Payload |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/api/inventory/stock-balance` | `stock:view` / `reports:view` / `products:view` | Daftar saldo stok per produk beserta `summary` (`totalSku`, `totalUnits`, `safeCount`, `lowCount`, `outCount`, `negativeCount`, `totalCostValue`, `totalRetailValue`, `allowNegativeStock`). Query: `search`, `stockStatus` (`ALL`, `LOW_OR_OUT`, `LOW`, `OUT`, `NEGATIVE`, `SAFE`), `categoryId`, `productStatus`, `page`, `pageSize`. |
+| `PATCH` | `/api/inventory/products/:id/min-stock` | `stock:adjust` / `products:edit` | Memperbarui batas minimum stok `{ minStock }` dan mencatat audit log `MIN_STOCK_UPDATED`. |
+| `GET` | `/api/inventory/products/:id/stock-card` | `stock:view` / `reports:view` / `products:view` | Kartu stok produk beserta saldo terkini, ringkasan masuk/keluar, dan daftar mutasi terfilter (`type`, `dateFrom`, `dateTo`). |
+| `GET` | `/api/inventory/movements` | `stock:view` / `reports:view` | Buku besar mutasi stok (`productId`, `type`, `search`, `dateFrom`, `dateTo`, `limit`). Tidak ada endpoint `DELETE` agar histori stok tetap permanen. |
+| `GET` | `/api/inventory/stock-in` | `stock:view` / `reports:view` | Riwayat penerimaan barang masuk (`search`, `productId`, `dateFrom`, `dateTo`, `limit`). |
+| `POST` | `/api/inventory/stock-in` | `stock:adjust` atau `pinApprovalToken` (`stock_adjustment`) | Mencatat penerimaan barang masuk atomik `{ productId, qty, costPrice?, updateProductCost?, referenceNumber?, receivedAt?, notes?, pinApprovalToken? }` dan mutasi `STOCK_IN`. |
+| `GET` | `/api/inventory/adjustments` | `stock:view` / `reports:view` | Riwayat penyesuaian stok (`search`, `productId`, `direction`, `limit`). |
+| `POST` | `/api/inventory/adjustments` | `stock:adjust` atau `pinApprovalToken` (`stock_adjustment`) | Penyesuaian stok atomik `{ productId, direction: 'INCREASE' \| 'DECREASE', qty, reason, notes?, referenceNumber?, pinApprovalToken? }` (mematuhi kebijakan `allowNegativeStock`). |
+| `GET` | `/api/inventory/opnames` | `stock:view` / `reports:view` | Daftar sesi stok opname (`?status=`). |
+| `GET` | `/api/inventory/opnames/:id` | `stock:view` / `reports:view` | Detail sesi opname beserta seluruh baris item (`systemStock`, `physicalStock`, `variance`, `varianceValue`). |
+| `POST` | `/api/inventory/opnames` | `stock:adjust` | Membuat sesi stok opname baru (`DRAFT`) untuk semua produk aktif atau `productIds[]` tertentu `{ title?, notes?, productIds?, includeInactive? }`. |
+| `PUT` | `/api/inventory/opnames/:id/counts` | `stock:adjust` | Memperbarui stok fisik per item `{ items: [{ productId, physicalStock, notes? }], addProductIds?, removeProductIds?, submitForReview? }` dan menghitung selisih otomatis. |
+| `POST` | `/api/inventory/opnames/:id/approve` | `stock:adjust` atau `pinApprovalToken` (`stock_adjustment`) | Menyetujui hasil stok opname (`APPROVED`) sebelum finalisasi saldo stok. |
+| `POST` | `/api/inventory/opnames/:id/finalize` | `stock:adjust` | Memfinalisasi sesi `APPROVED`, memperbarui `products.stock` secara atomik, dan menulis mutasi `OPNAME`. |
+| `POST` | `/api/inventory/opnames/:id/cancel` | `stock:adjust` | Membatalkan sesi opname yang belum difinalisasi `{ reason? }` tanpa mengubah saldo stok. |
+
+---
+
+## 9. Operasional Cepat, Bootstrap & Pengaturan Toko
 
 | Method | Endpoint | Izin | Deskripsi |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/api/bootstrap` | Authenticated | Mengambil seluruh data awal dashboard (`products`, `categories`, `brands`, `uoms`, `customers`, `paymentMethods`, `heldTransactions`, `transactions`, `stockMovements`, `settings`, `auditLogs`). |
-| `POST` | `/api/stock/adjust` | `stock:adjust` atau `pinApprovalToken` (`stock_adjustment`) | Penyesuaian restok masuk (`RESTOK`) atau stok opname (`OPNAME`). |
-| `PUT` | `/api/settings` | `settings:edit` | Memperbarui nama toko, alamat, telepon, PPN, `receiptPaperWidth` (`58mm`/`80mm`/`A4`), `receiptShowLogo`, `receiptShowQr`, `receiptHeaderNote`, dan `receiptFooter`. |
+| `GET` | `/api/bootstrap` | Authenticated | Mengambil seluruh data awal dashboard (`products`, `categories`, `brands`, `uoms`, `customers`, `promotions`, `loyaltySettings`, `paymentMethods`, `heldTransactions`, `transactions`, `stockMovements`, `settings`, `auditLogs`). |
+| `POST` | `/api/stock/adjust` | `stock:adjust` atau `pinApprovalToken` (`stock_adjustment`) | Penyesuaian restok masuk (`RESTOK`/`STOCK_IN`) atau stok opname (`OPNAME`) cepat. |
+| `PUT` | `/api/settings` | `settings:edit` | Memperbarui profil toko, PPN, `allowNegativeStock`, konfigurasi struk, serta kebijakan diskon & promo (`allowPromoStacking`, `allowManualWithPromo`, `maxCashierDiscountPercent`, `maxAuthorizedDiscountPercent`). |
 | `POST` | `/api/settings/logo` | `settings:edit` | Mengunggah logo toko (`PNG`/`JPG`/`WEBP`, maks 2 MB, validasi magic bytes) untuk dicetak pada struk. |
 | `DELETE` | `/api/settings/logo` | `settings:edit` | Menghapus logo toko dari pengaturan aktif (snapshot transaksi lama tetap terjaga). |
+
+---
+
+## 10. Pengenalan Produk AI (Phase 08)
+
+| Method | Endpoint | Izin | Deskripsi & Payload |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/api/recognition/providers` | `recognition:use` / `recognition:manage` / `pos:view` / `products:view` | Mengembalikan daftar provider AI terdaftar (`gemini-vision`, `local-inference`, `remote-inference`) beserta status ketersediaan jujur dan `settings` aktif. |
+| `GET` | `/api/recognition/settings` | `recognition:use` / `recognition:manage` / `pos:view` / `settings:edit` | Mengambil konfigurasi ambang batas keyakinan (`HIGH`/`MEDIUM`/`LOW`), opsi `autoAddHighConfidence`, `activeProviderId`, `remoteEndpointUrl`, dan `requestTimeoutMs`. |
+| `PUT` | `/api/recognition/settings` | `recognition:manage` / `settings:edit` | Memperbarui provider AI, batas keyakinan (`0 < low < medium < high <= 1`), `autoAddHighConfidence`, dan batas timeout (`3000–60000 ms`). |
+| `POST` | `/api/recognition/identify` | `recognition:use` / `pos:view` / `products:view` / `stock:view` | Menjalankan pipeline 13 langkah identifikasi produk dari gambar terkompresi (`dataBase64`, `mimeType`, `width?`, `height?`, `context?`). Mengembalikan OCR, region produk, skor multi-sinyal, kandidat terurut, dan `confidenceBand` (atau `503 PROVIDER_UNAVAILABLE` tanpa hasil palsu jika provider belum siap). |
+| `POST` | `/api/recognition/references/sync` | `recognition:manage` / `products:edit` / `catalog:manage` | Menghitung dan menyimpan vektor embedding (`product_image_embeddings`) untuk gambar referensi AI produk, serta memperbarui `ai_embedding_status = 'READY'`. |
+| `POST` | `/api/recognition/logs/:id/feedback` | `recognition:use` / `pos:view` / `products:view` / `stock:view` | Mencatat umpan balik kasir (`CONFIRMED`, `CORRECTED`, `REGISTERED_NEW`, `REJECTED`) beserta opsi `promoteAsReferenceImage` untuk menambah gambar terverifikasi ke referensi produk. |
+| `GET` | `/api/recognition/logs` | `recognition:use` / `recognition:manage` / `audit:view` / `pos:view` | Mengambil riwayat pengenalan AI dan hasil verifikasi kasir (`?outcome=&limit=`). |
+
+---
+
+## 11. Manajemen Pelanggan, Loyalitas Member & Promosi (Phase 09)
+
+| Method | Endpoint | Izin | Deskripsi & Payload |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/api/customers` | `customers:view` / `pos:view` / `transactions:view` | Daftar pelanggan lengkap dengan metrik agregat (`totalSpending`, `transactionCount`, `lastPurchaseDate`, `membershipNumber`, `loyaltyPoints`). Query: `?search=&status=`. |
+| `GET` | `/api/customers/:id` | `customers:view` / `pos:view` / `transactions:view` | Detail pelanggan beserta `transactions[]` (riwayat transaksi) dan `loyaltyHistory[]` (mutasi poin `EARN`/`REDEEM`/`ADJUST`). |
+| `POST` | `/api/customers` | `customers:create` / `pos:create` / `pos:view` | Membuat pelanggan baru `{ name, membershipNumber?, phone?, email?, address?, notes?, isActive? }`. Kode `CUST-XXXX` & nomor member `MBR-XXXX` dibuat otomatis bila kosong; menolak duplikat `membershipNumber` (`409`). |
+| `PUT` | `/api/customers/:id` | `customers:edit` | Memperbarui profil dan nomor member pelanggan. |
+| `PATCH` | `/api/customers/:id/status` | `customers:edit` | Mengubah status pelanggan `{ isActive: boolean }` (`CUSTOMER_STATUS_CHANGED`). |
+| `POST` | `/api/customers/:id/loyalty/adjust` | `customers:edit` | Penyesuaian saldo poin loyalitas manual `{ pointsDelta, notes? }` dengan validasi saldo non-negatif dan pencatatan mutasi `ADJUST`. |
+| `GET` | `/api/loyalty/settings` | `pos:view` / `customers:view` / `promotions:view` / `promotions:manage` / `settings:edit` | Mengambil konfigurasi program loyalitas (`enabled`, `pointsPerAmount`, `pointValueRp`, `minRedeemPoints`, `maxRedeemPercent`). |
+| `PUT` | `/api/loyalty/settings` | `promotions:manage` / `settings:edit` | Memperbarui aturan dasar perolehan & penukaran poin loyalitas. |
+| `GET` | `/api/promotions` | `promotions:view` / `promotions:manage` / `pos:view` | Daftar promosi dengan status efektif terhitung (`ACTIVE`, `SCHEDULED`, `EXPIRED`, `INACTIVE`). Query: `?search=&status=&scope=&activeOnly=true`. |
+| `POST` | `/api/promotions/evaluate` | `pos:view` / `pos:create` | Mengevaluasi kelayakan promosi & pratinjau diskon `BigInt` untuk keranjang tanpa menyimpan transaksi. |
+| `GET` | `/api/promotions/:id` | `promotions:view` / `promotions:manage` / `pos:view` | Detail aturan, target produk/kategori, dan statistik pemakaian promosi. |
+| `POST` | `/api/promotions` | `promotions:manage` | Membuat promosi baru `{ code?, name, description?, promoType: 'PERCENT'\|'FIXED_AMOUNT'\|'SPECIAL_PRICE'\|'BUY_X_GET_Y'\|'BUNDLE', scope: 'PRODUCT'\|'CATEGORY'\|'TRANSACTION'\|'BUNDLE', discountValue, maxDiscountAmount?, minPurchaseAmount?, minQty?, startDate, endDate, status?, stackable?, priority?, ruleConfig?, targets? }`. |
+| `PUT` | `/api/promotions/:id` | `promotions:manage` | Memperbarui aturan, periode, dan daftar target promosi. |
+| `PATCH` | `/api/promotions/:id/status` | `promotions:manage` | Mengaktifkan atau menonaktifkan promosi `{ status: 'ACTIVE' \| 'INACTIVE' }`. |
+
+
 

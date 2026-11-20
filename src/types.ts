@@ -183,14 +183,125 @@ export type PaymentMethodType = 'CASH' | 'DEBIT' | 'CREDIT' | 'QRIS' | 'OTHER';
 export interface Customer {
   id: string;
   code: string;
+  membershipNumber: string;
   name: string;
   phone: string;
   email: string;
   address: string;
   notes: string;
   isActive: boolean;
+  loyaltyPoints: number;
+  totalPointsEarned: number;
+  totalPointsRedeemed: number;
+  totalSpending: number;
+  transactionCount: number;
+  lastPurchaseDate: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export type LoyaltyPointTransactionType = 'EARN' | 'REDEEM' | 'ADJUST';
+
+export interface LoyaltyPointTransaction {
+  id: string;
+  customerId: string;
+  transactionId: string | null;
+  type: LoyaltyPointTransactionType;
+  pointsDelta: number;
+  pointsBefore: number;
+  pointsAfter: number;
+  referenceNumber: string;
+  notes: string;
+  actorUserId: string | null;
+  actorName: string;
+  createdAt: string;
+}
+
+export interface LoyaltySettings {
+  enabled: boolean;
+  pointsPerAmount: number;
+  pointValueRp: number;
+  minRedeemPoints: number;
+  maxRedeemPercent: number;
+  updatedAt: string;
+}
+
+export interface CustomerDetailResponse {
+  customer: Customer;
+  transactions: Transaction[];
+  loyaltyHistory: LoyaltyPointTransaction[];
+}
+
+export type PromotionType =
+  | 'PERCENT'
+  | 'FIXED_AMOUNT'
+  | 'SPECIAL_PRICE'
+  | 'BUY_X_GET_Y'
+  | 'BUNDLE';
+
+export type PromotionScope = 'PRODUCT' | 'TRANSACTION' | 'CATEGORY' | 'BUNDLE';
+
+export type PromotionStatus = 'ACTIVE' | 'INACTIVE';
+
+export type PromotionEffectiveStatus = 'ACTIVE' | 'INACTIVE' | 'SCHEDULED' | 'EXPIRED';
+
+export interface PromotionTarget {
+  id: string;
+  promotionId: string;
+  targetType: 'PRODUCT' | 'CATEGORY';
+  targetId: string;
+  targetName?: string;
+  requiredQty: number;
+}
+
+export interface PromotionRuleConfig {
+  buyQty?: number;
+  getQty?: number;
+  getProductId?: string;
+  getDiscountPercent?: number;
+  bundlePrice?: number;
+}
+
+export interface Promotion {
+  id: string;
+  code: string;
+  name: string;
+  description: string;
+  promoType: PromotionType;
+  scope: PromotionScope;
+  discountValue: number;
+  maxDiscountAmount: number | null;
+  minPurchaseAmount: number;
+  minQty: number;
+  startDate: string;
+  endDate: string;
+  status: PromotionStatus;
+  effectiveStatus: PromotionEffectiveStatus;
+  stackable: boolean;
+  priority: number;
+  ruleConfig: PromotionRuleConfig;
+  targets: PromotionTarget[];
+  usageCount: number;
+  createdByUserId: string | null;
+  createdByName: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AppliedPromotionSummary {
+  id: string;
+  code: string;
+  name: string;
+  promoType: PromotionType;
+  scope: PromotionScope;
+  discountAmount: number;
+}
+
+export interface PromotionEligibilityItem {
+  promotion: Promotion;
+  eligible: boolean;
+  estimatedDiscount: number;
+  reason?: string;
 }
 
 export interface PaymentMethodConfig {
@@ -233,6 +344,9 @@ export interface TransactionItem {
   lineDiscountAmount?: number;
   taxCategory?: TaxCategory;
   taxAmount?: number;
+  promotionId?: string | null;
+  promotionName?: string;
+  promotionDiscountAmount?: number;
   subtotal: number;
 }
 
@@ -252,6 +366,11 @@ export interface Transaction {
   transactionDiscountType: DiscountMode;
   transactionDiscountValue: number;
   transactionDiscountAmount: number;
+  promotionDiscountAmount?: number;
+  loyaltyPointsEarned?: number;
+  loyaltyPointsRedeemed?: number;
+  loyaltyDiscountAmount?: number;
+  appliedPromotions?: AppliedPromotionSummary[];
   discountAmount: number;
   applyTax: boolean;
   taxAmount: number;
@@ -294,16 +413,27 @@ export interface PosCalculationPreview {
     lineDiscountType: DiscountMode;
     lineDiscountValue: number;
     lineDiscountAmount: number;
+    promotionId: string | null;
+    promotionName: string;
+    promotionDiscountAmount: number;
     lineNetAfterDiscount: number;
     lineTaxAmount: number;
     taxCategory: TaxCategory;
   }>;
   subtotal: number;
   lineDiscountTotal: number;
+  promotionLineDiscountTotal: number;
   netAfterLineDiscounts: number;
   transactionDiscountType: DiscountMode;
   transactionDiscountValue: number;
   transactionDiscountAmount: number;
+  promotionTransactionDiscountAmount: number;
+  totalPromotionDiscount: number;
+  loyaltyPointsRedeemed: number;
+  loyaltyDiscountAmount: number;
+  estimatedPointsEarned: number;
+  appliedPromotions: AppliedPromotionSummary[];
+  eligiblePromotions: PromotionEligibilityItem[];
   totalDiscount: number;
   taxableAmount: number;
   taxAmount: number;
@@ -312,20 +442,184 @@ export interface PosCalculationPreview {
   requiresPriceOverrideApproval: boolean;
 }
 
-export type StockMovementType = 'PENJUALAN' | 'RESTOK' | 'OPNAME' | 'STOK_AWAL';
+export type StockMovementType =
+  | 'PENJUALAN'
+  | 'RESTOK'
+  | 'STOCK_IN'
+  | 'ADJUSTMENT_IN'
+  | 'ADJUSTMENT_OUT'
+  | 'OPNAME'
+  | 'STOK_AWAL';
 
 export interface StockMovement {
   id: string;
   productId: string;
+  sku?: string;
   productName: string;
   barcode: string;
   type: StockMovementType;
   qtyDelta: number;
   stockBefore: number;
   stockAfter: number;
+  unitCost?: number | null;
   referenceId: string;
+  reason?: string;
   notes: string;
+  actorUserId?: string | null;
+  actorName?: string;
+  movementDate?: string;
   createdAt: string;
+}
+
+export type StockStatusLevel = 'SAFE' | 'LOW' | 'OUT' | 'NEGATIVE';
+
+export interface StockBalanceItem {
+  productId: string;
+  sku: string;
+  barcode: string;
+  name: string;
+  category: string;
+  brandName: string;
+  unit: string;
+  costPrice: number;
+  sellPrice: number;
+  currentStock: number;
+  minStock: number;
+  stockStatus: StockStatusLevel;
+  productStatus: ProductStatus;
+  assetValue: number;
+  retailValue: number;
+  updatedAt: string;
+}
+
+export interface StockBalanceSummary {
+  totalSku: number;
+  totalUnits: number;
+  safeCount: number;
+  lowCount: number;
+  outCount: number;
+  negativeCount: number;
+  totalCostValue: number;
+  totalRetailValue: number;
+  allowNegativeStock: boolean;
+}
+
+export interface StockBalanceResponse {
+  items: StockBalanceItem[];
+  summary: StockBalanceSummary;
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+export interface StockReceivingRecord {
+  id: string;
+  referenceNumber: string;
+  productId: string;
+  sku: string;
+  productName: string;
+  barcode: string;
+  unit: string;
+  qty: number;
+  costPrice: number;
+  previousCostPrice: number;
+  updateProductCost: boolean;
+  notes: string;
+  receivedAt: string;
+  movementId: string;
+  createdByUserId: string | null;
+  createdByName: string;
+  createdAt: string;
+}
+
+export type StockAdjustmentDirection = 'INCREASE' | 'DECREASE';
+
+export interface StockAdjustmentRecord {
+  id: string;
+  referenceNumber: string;
+  productId: string;
+  sku: string;
+  productName: string;
+  barcode: string;
+  unit: string;
+  direction: StockAdjustmentDirection;
+  qty: number;
+  stockBefore: number;
+  stockAfter: number;
+  reason: string;
+  notes: string;
+  approvalStatus: 'APPROVED';
+  requestedByUserId: string | null;
+  requestedByName: string;
+  approvedByUserId: string | null;
+  approvedByName: string;
+  movementId: string;
+  createdAt: string;
+}
+
+export type StockOpnameStatus =
+  | 'DRAFT'
+  | 'PENDING_REVIEW'
+  | 'APPROVED'
+  | 'FINALIZED'
+  | 'CANCELLED';
+
+export interface StockOpnameItem {
+  id: string;
+  opnameId: string;
+  productId: string;
+  sku: string;
+  barcode: string;
+  productName: string;
+  unit: string;
+  costPrice: number;
+  systemStock: number;
+  physicalStock: number | null;
+  variance: number;
+  varianceValue: number;
+  isCounted: boolean;
+  notes: string;
+  appliedMovementId: string | null;
+  updatedAt: string;
+}
+
+export interface StockOpnameSession {
+  id: string;
+  opnameNumber: string;
+  title: string;
+  status: StockOpnameStatus;
+  notes: string;
+  totalItems: number;
+  countedItems: number;
+  discrepancyItems: number;
+  totalVarianceQty: number;
+  totalVarianceValue: number;
+  createdByUserId: string | null;
+  createdByName: string;
+  approvedByUserId: string | null;
+  approvedByName: string | null;
+  approvedAt: string | null;
+  finalizedByUserId: string | null;
+  finalizedByName: string | null;
+  finalizedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StockOpnameDetail extends StockOpnameSession {
+  items: StockOpnameItem[];
+}
+
+export interface StockCardResponse {
+  product: StockBalanceItem;
+  summary: {
+    totalIn: number;
+    totalOut: number;
+    netChange: number;
+    movementCount: number;
+  };
+  movements: StockMovement[];
 }
 
 export type ReceiptPaperWidth = '58mm' | '80mm' | 'A4';
@@ -380,6 +674,11 @@ export interface StoreSettings {
   receiptShowLogo?: boolean;
   receiptShowQr?: boolean;
   receiptHeaderNote?: string;
+  allowNegativeStock?: boolean;
+  allowPromoStacking?: boolean;
+  allowManualWithPromo?: boolean;
+  maxCashierDiscountPercent?: number;
+  maxAuthorizedDiscountPercent?: number;
 }
 
 export type AuditAction =
@@ -410,6 +709,12 @@ export type AuditAction =
   | 'UOM_CREATED'
   | 'UOM_UPDATED'
   | 'STOCK_ADJUSTED'
+  | 'STOCK_IN_RECORDED'
+  | 'STOCK_OPNAME_CREATED'
+  | 'STOCK_OPNAME_APPROVED'
+  | 'STOCK_OPNAME_FINALIZED'
+  | 'STOCK_OPNAME_CANCELLED'
+  | 'MIN_STOCK_UPDATED'
   | 'TRANSACTION_HELD'
   | 'TRANSACTION_RESUMED'
   | 'TRANSACTION_CANCELLED'
@@ -417,10 +722,20 @@ export type AuditAction =
   | 'RECEIPT_PRINTED'
   | 'RECEIPT_REPRINTED'
   | 'CUSTOMER_CREATED'
+  | 'CUSTOMER_UPDATED'
+  | 'CUSTOMER_STATUS_CHANGED'
+  | 'LOYALTY_POINTS_ADJUSTED'
+  | 'LOYALTY_SETTINGS_UPDATED'
+  | 'PROMOTION_CREATED'
+  | 'PROMOTION_UPDATED'
+  | 'PROMOTION_STATUS_CHANGED'
   | 'PAYMENT_METHOD_CREATED'
   | 'PAYMENT_METHOD_UPDATED'
   | 'STORE_LOGO_UPDATED'
-  | 'SETTINGS_UPDATED';
+  | 'SETTINGS_UPDATED'
+  | 'RECOGNITION_SETTINGS_UPDATED'
+  | 'RECOGNITION_FEEDBACK_RECORDED'
+  | 'RECOGNITION_INDEX_SYNCED';
 
 export interface AuditLog {
   id: string;
@@ -436,16 +751,171 @@ export interface AuditLog {
     | 'brand'
     | 'uom'
     | 'customer'
+    | 'loyalty'
+    | 'promotion'
     | 'payment_method'
     | 'stock'
     | 'transaction'
     | 'receipt'
-    | 'settings';
+    | 'settings'
+    | 'recognition';
   entityId: string;
   actorUserId?: string | null;
   actor: string;
   summary: string;
   createdAt: string;
+}
+
+export type RecognitionProviderKind =
+  | 'vision-ai'
+  | 'local-inference'
+  | 'remote-inference'
+  | 'ocr-similarity';
+
+export type RecognitionConfidenceBand = 'HIGH' | 'MEDIUM' | 'LOW' | 'UNKNOWN';
+
+export type RecognitionOutcome =
+  | 'PENDING'
+  | 'CONFIRMED'
+  | 'CORRECTED'
+  | 'REGISTERED_NEW'
+  | 'REJECTED'
+  | 'ERROR';
+
+export type RecognitionContext =
+  | 'POS_CASHIER'
+  | 'STOCK_OPNAME'
+  | 'CATALOG_CHECK'
+  | 'API';
+
+export interface RecognitionBoundingBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  label: string;
+  confidence: number;
+}
+
+export interface RecognitionOcrSignals {
+  productName: string;
+  brand: string;
+  variant: string;
+  flavor: string;
+  weight: string;
+  volume: string;
+  size: string;
+  packagingType: string;
+  productCode: string;
+  rawText: string;
+  keywords: string[];
+}
+
+export interface RecognitionSignalBreakdown {
+  imageSimilarity: number;
+  ocrTextSimilarity: number;
+  brandMatch: number;
+  variantMatch: number;
+  measureMatch: number;
+  packagingMatch: number;
+  feedbackBoost: number;
+}
+
+export interface RecognitionCandidate {
+  productId: string;
+  sku: string;
+  barcode: string;
+  name: string;
+  brandName: string;
+  category: string;
+  variant: string;
+  size: string;
+  sellPrice: number;
+  specialPrice: number | null;
+  stock: number;
+  unit: string;
+  primaryImageUrl: string | null;
+  matchedReferenceImageUrl: string | null;
+  confidence: number;
+  confidenceBand: RecognitionConfidenceBand;
+  matchReasons: string[];
+  signals: RecognitionSignalBreakdown;
+}
+
+export interface RecognitionProviderStatus {
+  id: string;
+  label: string;
+  kind: RecognitionProviderKind;
+  available: boolean;
+  supportsOcr: boolean;
+  supportsEmbeddings: boolean;
+  reason?: string;
+  modelName?: string;
+}
+
+export interface RecognitionSettings {
+  activeProviderId: string;
+  autoAddHighConfidence: boolean;
+  highConfidenceThreshold: number;
+  mediumConfidenceThreshold: number;
+  lowConfidenceThreshold: number;
+  remoteEndpointUrl: string;
+  requestTimeoutMs: number;
+  updatedAt: string;
+}
+
+export interface RecognitionResult {
+  logId: string;
+  providerId: string;
+  providerLabel: string;
+  capturedImageUrl: string | null;
+  imageWidth: number | null;
+  imageHeight: number | null;
+  detectedRegion: RecognitionBoundingBox | null;
+  ocrSignals: RecognitionOcrSignals;
+  candidates: RecognitionCandidate[];
+  bestMatch: RecognitionCandidate | null;
+  confidenceBand: RecognitionConfidenceBand;
+  autoAddEligible: boolean;
+  latencyMs: number;
+  settingsSnapshot: RecognitionSettings;
+  createdAt: string;
+}
+
+export interface RecognitionLogEntry {
+  id: string;
+  userId: string | null;
+  userName: string;
+  providerId: string;
+  context: RecognitionContext;
+  capturedImageUrl: string | null;
+  imageWidth: number | null;
+  imageHeight: number | null;
+  detectedRegion: RecognitionBoundingBox | null;
+  ocrSignals: RecognitionOcrSignals;
+  candidates: RecognitionCandidate[];
+  topProductId: string | null;
+  topProductName: string | null;
+  topConfidence: number;
+  confidenceBand: RecognitionConfidenceBand;
+  selectedProductId: string | null;
+  selectedProductName: string | null;
+  outcome: RecognitionOutcome;
+  isVerifiedFeedback: boolean;
+  notes: string;
+  latencyMs: number;
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReferenceEmbeddingSyncSummary {
+  providerId: string;
+  totalReferenceImages: number;
+  processed: number;
+  readyCount: number;
+  failedCount: number;
+  errors: Array<{ imageId: string; productId: string; message: string }>;
 }
 
 export interface Permission {
@@ -509,6 +979,8 @@ export interface StoreData {
   brands: Brand[];
   uoms: UnitOfMeasure[];
   customers: Customer[];
+  promotions: Promotion[];
+  loyaltySettings: LoyaltySettings;
   paymentMethods: PaymentMethodConfig[];
   transactions: Transaction[];
   heldTransactions: Transaction[];

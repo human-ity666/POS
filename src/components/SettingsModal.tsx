@@ -73,6 +73,7 @@ export function SettingsModal({
         receiptShowQr: settings.receiptShowQr ?? true,
         receiptHeaderNote: settings.receiptHeaderNote ?? '',
         storeLogoUrl: settings.storeLogoUrl ?? '',
+        allowNegativeStock: settings.allowNegativeStock ?? false,
       });
       setError(null);
       setMethodError(null);
@@ -340,6 +341,26 @@ export function SettingsModal({
                   className="w-full font-mono text-sm px-3 py-2 border border-slate-300 rounded-lg tabular-nums focus:outline-none focus:ring-2 focus:ring-teal-600"
                 />
               </div>
+            </div>
+
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg">
+              <label className="flex items-start gap-2.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={form.allowNegativeStock ?? false}
+                  onChange={(e) => setForm({ ...form, allowNegativeStock: e.target.checked })}
+                  className="mt-0.5 rounded border-slate-300 text-teal-700 focus:ring-teal-600"
+                />
+                <div>
+                  <span className="block text-xs font-semibold text-slate-800">
+                    Izinkan Stok Negatif (Oversell / Saldo Minus)
+                  </span>
+                  <span className="block text-[11px] text-slate-500 mt-0.5">
+                    Jika nonaktif, kasir dan penyesuaian pengurangan stok akan ditolak saat stok
+                    tersedia tidak mencukupi.
+                  </span>
+                </div>
+              </label>
             </div>
 
             <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-200">

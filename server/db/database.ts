@@ -32,6 +32,16 @@ export function getStoreUploadsDir(): string {
   return path.resolve(process.cwd(), 'data', 'uploads', 'store');
 }
 
+export function getRecognitionUploadsDir(): string {
+  if (process.env.POS_RECOGNITION_UPLOADS_DIR) {
+    return path.resolve(process.env.POS_RECOGNITION_UPLOADS_DIR);
+  }
+  if (process.env.POS_UPLOADS_DIR) {
+    return path.join(path.dirname(path.resolve(process.env.POS_UPLOADS_DIR)), 'recognition-uploads');
+  }
+  return path.resolve(process.cwd(), 'data', 'uploads', 'recognition');
+}
+
 const DEFAULT_PERMISSIONS: Permission[] = [
   // POS & Kasir
   { id: 'perm-pos-view', code: 'pos:view', module: 'POS & Kasir', action: 'view', label: 'Akses Terminal Kasir', description: 'Membuka layar kasir dan pemindai kamera' },
@@ -58,8 +68,10 @@ const DEFAULT_PERMISSIONS: Permission[] = [
   { id: 'perm-rpt-view', code: 'reports:view', module: 'Stok & Laporan', action: 'view', label: 'Lihat Laporan Valuasi & Laba', description: 'Mengakses laporan stok otomatis, nilai modal, dan ekspor CSV' },
   { id: 'perm-trx-view', code: 'transactions:view', module: 'Stok & Laporan', action: 'view', label: 'Lihat Riwayat Transaksi', description: 'Mengakses daftar invoice penjualan dan cetak ulang struk' },
 
-  // Pengaturan
+  // Pengaturan & AI
   { id: 'perm-set-edit', code: 'settings:edit', module: 'Pengaturan', action: 'edit', label: 'Ubah Pengaturan Toko & PPN', description: 'Mengubah nama toko, alamat, catatan struk, dan tarif PPN' },
+  { id: 'perm-rec-use', code: 'recognition:use', module: 'POS & Kasir', action: 'execute', label: 'Gunakan Pengenalan Produk AI', description: 'Mengambil foto kemasan produk dan mencocokkan dengan katalog menggunakan AI' },
+  { id: 'perm-rec-manage', code: 'recognition:manage', module: 'Pengaturan', action: 'edit', label: 'Kelola Provider & Threshold AI', description: 'Mengatur provider AI, batas keyakinan pengenalan produk, dan sinkronisasi embedding gambar referensi' },
 
   // Pengguna
   { id: 'perm-usr-view', code: 'users:view', module: 'Pengguna', action: 'view', label: 'Lihat Daftar Pengguna', description: 'Melihat akun staf, status aktif, dan detail profil' },
@@ -70,6 +82,13 @@ const DEFAULT_PERMISSIONS: Permission[] = [
   // Role & Izin
   { id: 'perm-rol-view', code: 'roles:view', module: 'Role & Izin', action: 'view', label: 'Lihat Role & Matriks Izin', description: 'Melihat daftar role dan hak akses masing-masing modul' },
   { id: 'perm-rol-edit', code: 'roles:edit', module: 'Role & Izin', action: 'edit', label: 'Kelola Role & Hak Akses', description: 'Membuat role kustom dan mengubah izin per role' },
+
+  // Pelanggan & Promosi (Phase 09)
+  { id: 'perm-cst-view', code: 'customers:view', module: 'Pelanggan & Promosi', action: 'view', label: 'Lihat Daftar & Riwayat Pelanggan', description: 'Melihat profil pelanggan, poin loyalitas, dan riwayat belanja' },
+  { id: 'perm-cst-create', code: 'customers:create', module: 'Pelanggan & Promosi', action: 'create', label: 'Daftarkan Pelanggan Baru', description: 'Menambahkan pelanggan / member baru dari manajemen pelanggan maupun kasir' },
+  { id: 'perm-cst-edit', code: 'customers:edit', module: 'Pelanggan & Promosi', action: 'edit', label: 'Kelola Pelanggan & Poin Loyalitas', description: 'Mengubah data pelanggan, status aktif, dan melakukan penyesuaian poin manual' },
+  { id: 'perm-prm-view', code: 'promotions:view', module: 'Pelanggan & Promosi', action: 'view', label: 'Lihat Daftar Promosi', description: 'Melihat promosi aktif, jadwal promo, dan memilih promo di kasir' },
+  { id: 'perm-prm-manage', code: 'promotions:manage', module: 'Pelanggan & Promosi', action: 'edit', label: 'Kelola Promosi & Aturan Loyalitas', description: 'Membuat, mengubah, mengaktifkan promo, dan mengatur aturan poin/stacking' },
 
   // Audit & Sesi
   { id: 'perm-aud-view', code: 'audit:view', module: 'Audit & Sesi', action: 'view', label: 'Lihat Audit Log Sistem', description: 'Melihat jejak audit login, perubahan pengguna, dan otorisasi sensitif' },
@@ -89,6 +108,8 @@ const ROLE_PERMISSION_MAP: Record<string, string[]> = {
     'pos:cancel',
     'pos:void',
     'pos:refund',
+    'recognition:use',
+    'recognition:manage',
     'products:view',
     'products:create',
     'products:edit',
@@ -98,6 +119,11 @@ const ROLE_PERMISSION_MAP: Record<string, string[]> = {
     'stock:adjust',
     'reports:view',
     'transactions:view',
+    'customers:view',
+    'customers:create',
+    'customers:edit',
+    'promotions:view',
+    'promotions:manage',
     'users:view',
     'audit:view',
     'sessions:view',
@@ -108,8 +134,12 @@ const ROLE_PERMISSION_MAP: Record<string, string[]> = {
     'pos:hold',
     'pos:resume',
     'pos:cancel',
+    'recognition:use',
     'products:view',
     'transactions:view',
+    'customers:view',
+    'customers:create',
+    'promotions:view',
   ],
 };
 
@@ -132,20 +162,25 @@ function runMigrations(db: DatabaseSync): void {
     'INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)'
   );
 
-  for (const file of files) {
-    const alreadyApplied = appliedStmt.get(file);
-    if (alreadyApplied) continue;
+  db.exec('PRAGMA foreign_keys = OFF;');
+  try {
+    for (const file of files) {
+      const alreadyApplied = appliedStmt.get(file);
+      if (alreadyApplied) continue;
 
-    const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf-8');
-    db.exec('BEGIN IMMEDIATE;');
-    try {
-      db.exec(sql);
-      insertMigStmt.run(file, new Date().toISOString());
-      db.exec('COMMIT;');
-    } catch (err) {
-      db.exec('ROLLBACK;');
-      throw err;
+      const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf-8');
+      db.exec('BEGIN IMMEDIATE;');
+      try {
+        db.exec(sql);
+        insertMigStmt.run(file, new Date().toISOString());
+        db.exec('COMMIT;');
+      } catch (err) {
+        db.exec('ROLLBACK;');
+        throw err;
+      }
     }
+  } finally {
+    db.exec('PRAGMA foreign_keys = ON;');
   }
 }
 
@@ -637,11 +672,32 @@ function seedRbacIfEmpty(db: DatabaseSync): void {
       const permId = permIdByCode.get(code);
       if (permId) insertRolePerm.run('role-admin', permId);
     }
-    for (const code of ['products:import', 'catalog:manage', 'pos:hold', 'pos:resume', 'pos:cancel']) {
+    for (const code of [
+      'products:import',
+      'catalog:manage',
+      'pos:hold',
+      'pos:resume',
+      'pos:cancel',
+      'recognition:use',
+      'recognition:manage',
+      'customers:view',
+      'customers:create',
+      'customers:edit',
+      'promotions:view',
+      'promotions:manage',
+    ]) {
       const permId = permIdByCode.get(code);
       if (permId) insertRolePerm.run('role-supervisor', permId);
     }
-    for (const code of ['pos:hold', 'pos:resume', 'pos:cancel']) {
+    for (const code of [
+      'pos:hold',
+      'pos:resume',
+      'pos:cancel',
+      'recognition:use',
+      'customers:view',
+      'customers:create',
+      'promotions:view',
+    ]) {
       const permId = permIdByCode.get(code);
       if (permId) insertRolePerm.run('role-cashier', permId);
     }
@@ -724,12 +780,100 @@ function seedPosCoreMasterIfEmpty(db: DatabaseSync): void {
     const custCount = db.prepare('SELECT COUNT(*) as cnt FROM customers').get() as { cnt: number };
     if (custCount.cnt === 0) {
       const insertCust = db.prepare(`
-        INSERT INTO customers (id, code, name, phone, email, address, notes, is_active, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        INSERT INTO customers (
+          id, code, membership_number, name, phone, email, address, notes,
+          is_active, loyalty_points, total_points_earned, total_points_redeemed,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 0, ?, ?)
       `);
-      insertCust.run('cust-001', 'CUST-0001', 'Dewi Lestari', '081234567890', 'dewi@pelanggan.id', 'Jl. Melati No. 14', 'Pelanggan tetap', nowIso, nowIso);
-      insertCust.run('cust-002', 'CUST-0002', 'Hendra Wijaya', '081398765432', 'hendra@pelanggan.id', 'Jl. Anggrek No. 8', 'Belanja grosir mingguan', nowIso, nowIso);
-      insertCust.run('cust-003', 'CUST-0003', 'Sari Puspita', '085611223344', '', 'Perumahan Griya Asri B2', '', nowIso, nowIso);
+      insertCust.run('cust-001', 'CUST-0001', 'MBR-0001', 'Dewi Lestari', '081234567890', 'dewi@pelanggan.id', 'Jl. Melati No. 14', 'Pelanggan tetap', 45, 45, nowIso, nowIso);
+      insertCust.run('cust-002', 'CUST-0002', 'MBR-0002', 'Hendra Wijaya', '081398765432', 'hendra@pelanggan.id', 'Jl. Anggrek No. 8', 'Belanja grosir mingguan', 120, 120, nowIso, nowIso);
+      insertCust.run('cust-003', 'CUST-0003', 'MBR-0003', 'Sari Puspita', '085611223344', '', 'Perumahan Griya Asri B2', '', 15, 15, nowIso, nowIso);
+    }
+
+    const promoCount = db.prepare('SELECT COUNT(*) as cnt FROM promotions').get() as { cnt: number };
+    if (promoCount.cnt === 0) {
+      const startIso = new Date(Date.now() - 86400_000).toISOString().slice(0, 10);
+      const endIso = new Date(Date.now() + 180 * 86400_000).toISOString().slice(0, 10);
+
+      const insertPromo = db.prepare(`
+        INSERT INTO promotions (
+          id, code, name, description, promo_type, scope, discount_value,
+          max_discount_amount, min_purchase_amount, min_qty, start_date, end_date,
+          status, stackable, priority, rule_json, usage_count,
+          created_by_user_id, created_by_name, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, 0, 'usr-admin', 'Sistem', ?, ?)
+      `);
+      const insertTarget = db.prepare(`
+        INSERT INTO promotion_targets (id, promotion_id, target_type, target_id, required_qty)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+
+      insertPromo.run(
+        'promo-hemat10',
+        'HEMAT10',
+        'Diskon Belanja Hemat 10%',
+        'Potongan 10% (maks. Rp 25.000) untuk total belanja minimal Rp 100.000.',
+        'PERCENT',
+        'TRANSACTION',
+        10,
+        25000,
+        100000,
+        1,
+        startIso,
+        endIso,
+        1,
+        20,
+        '{}',
+        nowIso,
+        nowIso
+      );
+
+      insertPromo.run(
+        'promo-grosir-mie',
+        'MIE5SPESIAL',
+        'Harga Spesial Indomie (Min. 5)',
+        'Harga spesial Rp 2.800 per bungkus untuk pembelian minimal 5 pcs Indomie Goreng.',
+        'SPECIAL_PRICE',
+        'PRODUCT',
+        2800,
+        null,
+        0,
+        5,
+        startIso,
+        endIso,
+        1,
+        10,
+        '{}',
+        nowIso,
+        nowIso
+      );
+      if (db.prepare('SELECT 1 FROM products WHERE id = ?').get('prd-01')) {
+        insertTarget.run('ptgt-mie-1', 'promo-grosir-mie', 'PRODUCT', 'prd-01', 1);
+      }
+
+      insertPromo.run(
+        'promo-minuman-segarkan',
+        'MINUMAN1K',
+        'Potongan Rp 1.000 Kategori Minuman',
+        'Potongan tetap Rp 1.000 untuk kategori Minuman dengan pembelian minimal 2 item.',
+        'FIXED_AMOUNT',
+        'CATEGORY',
+        1000,
+        null,
+        0,
+        2,
+        startIso,
+        endIso,
+        1,
+        15,
+        '{}',
+        nowIso,
+        nowIso
+      );
+      if (db.prepare('SELECT 1 FROM categories WHERE id = ?').get('cat-minuman')) {
+        insertTarget.run('ptgt-min-1', 'promo-minuman-segarkan', 'CATEGORY', 'cat-minuman', 1);
+      }
     }
 
     db.exec('COMMIT;');
@@ -758,6 +902,11 @@ export function getDb(): DatabaseSync {
   const storeUploadsDir = getStoreUploadsDir();
   if (!fs.existsSync(storeUploadsDir)) {
     fs.mkdirSync(storeUploadsDir, { recursive: true });
+  }
+
+  const recognitionUploadsDir = getRecognitionUploadsDir();
+  if (!fs.existsSync(recognitionUploadsDir)) {
+    fs.mkdirSync(recognitionUploadsDir, { recursive: true });
   }
 
   const db = new DatabaseSync(targetPath);

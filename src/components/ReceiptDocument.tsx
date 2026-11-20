@@ -104,6 +104,11 @@ export function ReceiptDocument({
                       {item.barcode}
                       {item.priceOverride ? ' · Harga Khusus' : ''}
                     </p>
+                    {(item.promotionDiscountAmount ?? 0) > 0 && (
+                      <p className="text-[10px] text-teal-700">
+                        {item.promotionName || 'Promo'} (-{formatRupiah(item.promotionDiscountAmount ?? 0)})
+                      </p>
+                    )}
                   </td>
                   <td className="py-2.5 px-2 text-right font-mono whitespace-nowrap">
                     {item.qty} {item.unit}
@@ -112,8 +117,10 @@ export function ReceiptDocument({
                     {formatRupiah(item.sellPrice)}
                   </td>
                   <td className="py-2.5 px-2 text-right font-mono text-rose-700 whitespace-nowrap">
-                    {(item.lineDiscountAmount ?? 0) > 0
-                      ? `-${formatRupiah(item.lineDiscountAmount ?? 0)}`
+                    {(item.lineDiscountAmount ?? 0) + (item.promotionDiscountAmount ?? 0) > 0
+                      ? `-${formatRupiah(
+                          (item.lineDiscountAmount ?? 0) + (item.promotionDiscountAmount ?? 0)
+                        )}`
                       : '—'}
                   </td>
                   <td className="py-2.5 pl-2 text-right font-mono font-semibold text-slate-900 whitespace-nowrap">
@@ -172,14 +179,28 @@ export function ReceiptDocument({
                 <span className="font-mono">-{formatRupiah(trx.lineDiscountTotal)}</span>
               </div>
             )}
+            {(trx.promotionDiscountAmount ?? 0) > 0 && (
+              <div className="flex justify-between text-teal-700">
+                <span>Diskon Promosi</span>
+                <span className="font-mono">-{formatRupiah(trx.promotionDiscountAmount ?? 0)}</span>
+              </div>
+            )}
             {trx.transactionDiscountAmount > 0 && (
               <div className="flex justify-between text-rose-700">
                 <span>Diskon Transaksi</span>
                 <span className="font-mono">-{formatRupiah(trx.transactionDiscountAmount)}</span>
               </div>
             )}
+            {(trx.loyaltyDiscountAmount ?? 0) > 0 && (
+              <div className="flex justify-between text-teal-700">
+                <span>Tukar Poin ({trx.loyaltyPointsRedeemed ?? 0} poin)</span>
+                <span className="font-mono">-{formatRupiah(trx.loyaltyDiscountAmount ?? 0)}</span>
+              </div>
+            )}
             {trx.lineDiscountTotal === 0 &&
               trx.transactionDiscountAmount === 0 &&
+              (trx.promotionDiscountAmount ?? 0) === 0 &&
+              (trx.loyaltyDiscountAmount ?? 0) === 0 &&
               trx.discountAmount > 0 && (
                 <div className="flex justify-between text-rose-700">
                   <span>Diskon</span>
@@ -204,6 +225,20 @@ export function ReceiptDocument({
               <span>Kembalian</span>
               <span className="font-mono">{formatRupiah(trx.changeAmount)}</span>
             </div>
+            {((trx.loyaltyPointsEarned ?? 0) > 0 || (trx.loyaltyPointsRedeemed ?? 0) > 0) && (
+              <div className="flex justify-between text-[11px] text-teal-800 pt-1 border-t border-dashed border-slate-200">
+                <span>Poin Member</span>
+                <span className="font-mono font-semibold">
+                  {(trx.loyaltyPointsEarned ?? 0) > 0 ? `+${trx.loyaltyPointsEarned} didapat` : ''}
+                  {(trx.loyaltyPointsEarned ?? 0) > 0 && (trx.loyaltyPointsRedeemed ?? 0) > 0
+                    ? ' / '
+                    : ''}
+                  {(trx.loyaltyPointsRedeemed ?? 0) > 0
+                    ? `-${trx.loyaltyPointsRedeemed} ditukar`
+                    : ''}
+                </span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -301,6 +336,12 @@ export function ReceiptDocument({
                 <span>-{formatRupiah(item.lineDiscountAmount ?? 0)}</span>
               </div>
             )}
+            {(item.promotionDiscountAmount ?? 0) > 0 && (
+              <div className="flex justify-between text-[10px] text-teal-700 tabular-nums">
+                <span>{item.promotionName || 'Promo'}</span>
+                <span>-{formatRupiah(item.promotionDiscountAmount ?? 0)}</span>
+              </div>
+            )}
           </div>
         ))}
       </div>
@@ -317,14 +358,28 @@ export function ReceiptDocument({
             <span>-{formatRupiah(trx.lineDiscountTotal)}</span>
           </div>
         )}
+        {(trx.promotionDiscountAmount ?? 0) > 0 && (
+          <div className="flex justify-between text-teal-700">
+            <span>Diskon Promosi</span>
+            <span>-{formatRupiah(trx.promotionDiscountAmount ?? 0)}</span>
+          </div>
+        )}
         {trx.transactionDiscountAmount > 0 && (
           <div className="flex justify-between text-rose-700">
             <span>Diskon Transaksi</span>
             <span>-{formatRupiah(trx.transactionDiscountAmount)}</span>
           </div>
         )}
+        {(trx.loyaltyDiscountAmount ?? 0) > 0 && (
+          <div className="flex justify-between text-teal-700">
+            <span>Tukar Poin ({trx.loyaltyPointsRedeemed ?? 0})</span>
+            <span>-{formatRupiah(trx.loyaltyDiscountAmount ?? 0)}</span>
+          </div>
+        )}
         {trx.lineDiscountTotal === 0 &&
           trx.transactionDiscountAmount === 0 &&
+          (trx.promotionDiscountAmount ?? 0) === 0 &&
+          (trx.loyaltyDiscountAmount ?? 0) === 0 &&
           trx.discountAmount > 0 && (
             <div className="flex justify-between text-rose-700">
               <span>Diskon</span>
@@ -375,6 +430,18 @@ export function ReceiptDocument({
           <span className="text-slate-600">Kembalian</span>
           <span>{formatRupiah(trx.changeAmount)}</span>
         </div>
+        {((trx.loyaltyPointsEarned ?? 0) > 0 || (trx.loyaltyPointsRedeemed ?? 0) > 0) && (
+          <div className="flex justify-between text-[10px] text-teal-800 pt-1 border-t border-dashed border-slate-200">
+            <span>Poin Member</span>
+            <span>
+              {(trx.loyaltyPointsEarned ?? 0) > 0 ? `+${trx.loyaltyPointsEarned}` : ''}
+              {(trx.loyaltyPointsEarned ?? 0) > 0 && (trx.loyaltyPointsRedeemed ?? 0) > 0
+                ? ' / '
+                : ''}
+              {(trx.loyaltyPointsRedeemed ?? 0) > 0 ? `-${trx.loyaltyPointsRedeemed}` : ''}
+            </span>
+          </div>
+        )}
       </div>
 
       {trx.notes && (

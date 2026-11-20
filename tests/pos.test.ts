@@ -15,6 +15,23 @@ process.env.POS_SKIP_LISTEN = '1';
 
 const { createApp } = await import('../server.ts');
 const { closeDb, getDb } = await import('../server/db/database.ts');
+const {
+  computeGs1CheckDigit,
+  detectScannerCapabilities,
+  DuplicateScanGuard,
+  isRearCameraLabel,
+  validateAndNormalizeBarcode,
+  verifyGs1CheckDigit,
+} = await import('../src/utils/barcodeScanner.ts');
+const {
+  registerRecognitionProvider,
+  unregisterRecognitionProvider,
+} = await import('../server/services/ai/providerRegistry.ts');
+const {
+  normalizeOcrSignals,
+  parseMeasureString,
+  scoreProductCandidate,
+} = await import('../server/services/ai/providerTypes.ts');
 
 let server: Server;
 let baseUrl: string;
@@ -1330,5 +1347,1424 @@ describe('Phase 05 — Receipt & Printing APIs', () => {
   });
 });
 
+describe('Phase 06 — Inventory & Stock Control APIs', () => {
+  let p6AdminToken = '';
+  let p6CashierToken = '';
+  let p6ProductId = '';
+
+  before(async () => {
+    const adminRes = await api<{ accessToken: string }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier: 'admin', password: 'Admin123!' }),
+    });
+    assert.equal(adminRes.status, 200);
+    p6AdminToken = adminRes.body.accessToken;
+
+    const cashierRes = await api<{ accessToken: string }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier: 'kasir', password: 'Kasir123!' }),
+    });
+    assert.equal(cashierRes.status, 200);
+    p6CashierToken = cashierRes.body.accessToken;
+
+    const prodRes = await api<{ product: { id: string } }>('/api/products', {
+      method: 'POST',
+      token: p6AdminToken,
+      body: JSON.stringify({
+        sku: 'SKU-P6-STOCK-01',
+        barcode: '8996666000018',
+        name: 'Susu UHT Full Cream 1L Uji',
+        category: 'Minuman',
+        unit: 'PACK',
+        costPrice: 14000,
+        sellPrice: 19500,
+        stock: 10,
+        minStock: 4,
+      }),
+    });
+    assert.equal(prodRes.status, 201);
+    p6ProductId = prodRes.body.product.id;
+  });
+
+  it('protects stock from direct product edits and protects stock history from product deletion', async () => {
+    // Attempt direct stock mutation via PUT /api/products/:id -> rejected (400)
+    const directMutate = await api<{ error: string }>(`/api/products/${p6ProductId}`, {
+      method: 'PUT',
+      token: p6AdminToken,
+      body: JSON.stringify({ stock: 999 }),
+    });
+    assert.equal(directMutate.status, 400);
+
+    // Attempt deleting product that has STOK_AWAL movement -> rejected (409)
+    const deleteBlocked = await api<{ error: string }>(`/api/products/${p6ProductId}`, {
+      method: 'DELETE',
+      token: p6AdminToken,
+    });
+    assert.equal(deleteBlocked.status, 409);
+  });
+
+  it('computes Stock Balance summary, filters statuses, and configures minStock', async () => {
+    const bal1 = await api<{
+      items: Array<{ productId: string; currentStock: number; minStock: number; stockStatus: string }>;
+      summary: { totalSku: number; safeCount: number; allowNegativeStock: boolean };
+    }>('/api/inventory/stock-balance?search=SKU-P6-STOCK-01', { token: p6AdminToken });
+    assert.equal(bal1.status, 200);
+    assert.equal(bal1.body.items.length, 1);
+    assert.equal(bal1.body.items[0].currentStock, 10);
+    assert.equal(bal1.body.items[0].stockStatus, 'SAFE');
+
+    // Raise minStock to 12 -> stockStatus becomes LOW
+    const minPatch = await api<{
+      item: { minStock: number; stockStatus: string };
+    }>(`/api/inventory/products/${p6ProductId}/min-stock`, {
+      method: 'PATCH',
+      token: p6AdminToken,
+      body: JSON.stringify({ minStock: 12 }),
+    });
+    assert.equal(minPatch.status, 200);
+    assert.equal(minPatch.body.item.minStock, 12);
+    assert.equal(minPatch.body.item.stockStatus, 'LOW');
+
+    // Reset minStock back to 5
+    await api(`/api/inventory/products/${p6ProductId}/min-stock`, {
+      method: 'PATCH',
+      token: p6AdminToken,
+      body: JSON.stringify({ minStock: 5 }),
+    });
+  });
+
+  it('records Stock In receiving, updates optional costPrice, and traces STOCK_IN movement', async () => {
+    const badQty = await api<{ error: string }>('/api/inventory/stock-in', {
+      method: 'POST',
+      token: p6AdminToken,
+      body: JSON.stringify({ productId: p6ProductId, qty: 0 }),
+    });
+    assert.equal(badQty.status, 400);
+
+    const rcvRes = await api<{
+      receiving: {
+        referenceNumber: string;
+        qty: number;
+        costPrice: number;
+        updateProductCost: boolean;
+      };
+      movement: {
+        type: string;
+        qtyDelta: number;
+        stockBefore: number;
+        stockAfter: number;
+      };
+      product: { stock: number; costPrice: number };
+    }>('/api/inventory/stock-in', {
+      method: 'POST',
+      token: p6AdminToken,
+      body: JSON.stringify({
+        productId: p6ProductId,
+        qty: 15,
+        costPrice: 14500,
+        updateProductCost: true,
+        notes: 'Pengiriman PT Dairy',
+      }),
+    });
+    assert.equal(rcvRes.status, 201);
+    assert.ok(rcvRes.body.receiving.referenceNumber.startsWith('RCV-'));
+    assert.equal(rcvRes.body.movement.type, 'STOCK_IN');
+    assert.equal(rcvRes.body.movement.qtyDelta, 15);
+    assert.equal(rcvRes.body.movement.stockBefore, 10);
+    assert.equal(rcvRes.body.movement.stockAfter, 25);
+    assert.equal(rcvRes.body.product.stock, 25);
+    assert.equal(rcvRes.body.product.costPrice, 14500);
+
+    const listRcv = await api<{ receivings: Array<{ referenceNumber: string }> }>(
+      `/api/inventory/stock-in?productId=${p6ProductId}`,
+      { token: p6AdminToken }
+    );
+    assert.equal(listRcv.status, 200);
+    assert.ok(
+      listRcv.body.receivings.some((r) => r.referenceNumber === rcvRes.body.receiving.referenceNumber)
+    );
+  });
+
+  it('requires PIN approval for Cashier Stock Adjustment and enforces configurable negative stock rules', async () => {
+    // 1. Cashier without stock:adjust gets 403 PIN_REQUIRED
+    const denied = await api<{ code: string }>('/api/inventory/adjustments', {
+      method: 'POST',
+      token: p6CashierToken,
+      body: JSON.stringify({
+        productId: p6ProductId,
+        direction: 'DECREASE',
+        qty: 3,
+        reason: 'Kemasan bocor',
+      }),
+    });
+    assert.equal(denied.status, 403);
+    assert.equal(denied.body.code, 'PIN_REQUIRED');
+
+    // 2. Supervisor authorizes via PIN
+    const pinRes = await api<{ pinApprovalToken: string }>('/api/auth/verify-pin', {
+      method: 'POST',
+      token: p6CashierToken,
+      body: JSON.stringify({
+        authorizerIdentifier: 'supervisor',
+        pin: '654321',
+        action: 'stock_adjustment',
+        reason: 'Verifikasi barang rusak',
+      }),
+    });
+    assert.equal(pinRes.status, 200);
+
+    const adjRes = await api<{
+      adjustment: {
+        direction: string;
+        qty: number;
+        stockBefore: number;
+        stockAfter: number;
+        requestedByName: string;
+        approvedByName: string;
+      };
+      movement: { type: string; qtyDelta: number };
+    }>('/api/inventory/adjustments', {
+      method: 'POST',
+      token: p6CashierToken,
+      body: JSON.stringify({
+        productId: p6ProductId,
+        direction: 'DECREASE',
+        qty: 3,
+        reason: 'Kemasan bocor',
+        notes: 'Rak pendingin 2',
+        pinApprovalToken: pinRes.body.pinApprovalToken,
+      }),
+    });
+    assert.equal(adjRes.status, 201);
+    assert.equal(adjRes.body.adjustment.stockBefore, 25);
+    assert.equal(adjRes.body.adjustment.stockAfter, 22);
+    assert.equal(adjRes.body.adjustment.approvedByName, 'Siti Rahayu (Supervisor)');
+    assert.equal(adjRes.body.movement.type, 'ADJUSTMENT_OUT');
+    assert.equal(adjRes.body.movement.qtyDelta, -3);
+
+    // 3. When allowNegativeStock = false, decreasing 30 from 22 must be rejected (409)
+    const negRejected = await api<{ error: string }>('/api/inventory/adjustments', {
+      method: 'POST',
+      token: p6AdminToken,
+      body: JSON.stringify({
+        productId: p6ProductId,
+        direction: 'DECREASE',
+        qty: 30,
+        reason: 'Uji stok minus ditolak',
+      }),
+    });
+    assert.equal(negRejected.status, 409);
+
+    // 4. Enable allowNegativeStock = true via settings -> decrease & POS oversell succeed cleanly
+    const enableNeg = await api<{ settings: { allowNegativeStock: boolean } }>('/api/settings', {
+      method: 'PUT',
+      token: p6AdminToken,
+      body: JSON.stringify({ allowNegativeStock: true }),
+    });
+    assert.equal(enableNeg.status, 200);
+    assert.equal(enableNeg.body.settings.allowNegativeStock, true);
+
+    const negAdj = await api<{
+      adjustment: { stockAfter: number };
+    }>('/api/inventory/adjustments', {
+      method: 'POST',
+      token: p6AdminToken,
+      body: JSON.stringify({
+        productId: p6ProductId,
+        direction: 'DECREASE',
+        qty: 24,
+        reason: 'Uji stok negatif diizinkan',
+      }),
+    });
+    assert.equal(negAdj.status, 201);
+    assert.equal(negAdj.body.adjustment.stockAfter, -2);
+
+    // Verify POS sale also allows negative stock when enabled (2 -> -4)
+    const oversellTrx = await api<{
+      transaction: { total: number };
+      store: { products: Array<{ id: string; stock: number }> };
+    }>('/api/transactions', {
+      method: 'POST',
+      token: p6CashierToken,
+      body: JSON.stringify({
+        items: [{ productId: p6ProductId, qty: 2 }],
+        applyTax: false,
+        paymentMethod: 'Tunai',
+        cashReceived: 50000,
+      }),
+    });
+    assert.equal(oversellTrx.status, 201);
+    assert.equal(
+      oversellTrx.body.store.products.find((p) => p.id === p6ProductId)?.stock,
+      -4
+    );
+
+    const negBal = await api<{
+      items: Array<{ productId: string; stockStatus: string; currentStock: number }>;
+    }>('/api/inventory/stock-balance?stockStatus=NEGATIVE', { token: p6AdminToken });
+    assert.equal(negBal.status, 200);
+    assert.ok(
+      negBal.body.items.some((i) => i.productId === p6ProductId && i.stockStatus === 'NEGATIVE')
+    );
+
+    // Restore allowNegativeStock = false
+    await api('/api/settings', {
+      method: 'PUT',
+      token: p6AdminToken,
+      body: JSON.stringify({ allowNegativeStock: false }),
+    });
+  });
+
+  it('executes full Stock Opname workflow (Create -> Count -> Review -> Approve -> Finalize) and traces Stock Card', async () => {
+    // 1. Create opname for p6ProductId (system stock currently -4)
+    const createOp = await api<{
+      opname: { id: string; opnameNumber: string; status: string; totalItems: number };
+    }>('/api/inventory/opnames', {
+      method: 'POST',
+      token: p6AdminToken,
+      body: JSON.stringify({
+        title: 'Opname Uji Produk Susu',
+        productIds: [p6ProductId],
+        notes: 'Hitung ulang rak susu',
+      }),
+    });
+    assert.equal(createOp.status, 201);
+    assert.equal(createOp.body.opname.status, 'DRAFT');
+    assert.equal(createOp.body.opname.totalItems, 1);
+    const opnameId = createOp.body.opname.id;
+
+    // 2. Enter physical count = 12 -> variance = +16 -> submitForReview -> PENDING_REVIEW
+    const countOp = await api<{
+      opname: {
+        status: string;
+        countedItems: number;
+        discrepancyItems: number;
+        totalVarianceQty: number;
+        items: Array<{ physicalStock: number; variance: number }>;
+      };
+    }>(`/api/inventory/opnames/${opnameId}/counts`, {
+      method: 'PUT',
+      token: p6AdminToken,
+      body: JSON.stringify({
+        items: [{ productId: p6ProductId, physicalStock: 12, notes: 'Ditemukan di gudang' }],
+        submitForReview: true,
+      }),
+    });
+    assert.equal(countOp.status, 200);
+    assert.equal(countOp.body.opname.status, 'PENDING_REVIEW');
+    assert.equal(countOp.body.opname.countedItems, 1);
+    assert.equal(countOp.body.opname.discrepancyItems, 1);
+    assert.equal(countOp.body.opname.totalVarianceQty, 16);
+    assert.equal(countOp.body.opname.items[0].physicalStock, 12);
+    assert.equal(countOp.body.opname.items[0].variance, 16);
+
+    // 3. Approve opname -> APPROVED
+    const approveOp = await api<{
+      opname: { status: string; approvedByName: string };
+    }>(`/api/inventory/opnames/${opnameId}/approve`, {
+      method: 'POST',
+      token: p6AdminToken,
+      body: JSON.stringify({}),
+    });
+    assert.equal(approveOp.status, 200);
+    assert.equal(approveOp.body.opname.status, 'APPROVED');
+    assert.ok(approveOp.body.opname.approvedByName);
+
+    // 4. Finalize opname -> updates product stock to 12 & records OPNAME stock movement
+    const finalizeOp = await api<{
+      opname: { status: string; opnameNumber: string };
+      store: { products: Array<{ id: string; stock: number }> };
+    }>(`/api/inventory/opnames/${opnameId}/finalize`, {
+      method: 'POST',
+      token: p6AdminToken,
+      body: JSON.stringify({}),
+    });
+    assert.equal(finalizeOp.status, 200);
+    assert.equal(finalizeOp.body.opname.status, 'FINALIZED');
+    assert.equal(
+      finalizeOp.body.store.products.find((p) => p.id === p6ProductId)?.stock,
+      12
+    );
+
+    // Re-finalizing must fail (409)
+    const doubleFinalize = await api<{ error: string }>(
+      `/api/inventory/opnames/${opnameId}/finalize`,
+      { method: 'POST', token: p6AdminToken, body: JSON.stringify({}) }
+    );
+    assert.equal(doubleFinalize.status, 409);
+
+    // 5. Stock Card reflects complete traceable ledger back to 12
+    const cardRes = await api<{
+      product: { currentStock: number; stockStatus: string };
+      summary: { totalIn: number; totalOut: number; movementCount: number };
+      movements: Array<{ type: string; qtyDelta: number; stockAfter: number; referenceId: string }>;
+    }>(`/api/inventory/products/${p6ProductId}/stock-card`, { token: p6AdminToken });
+    assert.equal(cardRes.status, 200);
+    assert.equal(cardRes.body.product.currentStock, 12);
+    assert.equal(cardRes.body.product.stockStatus, 'SAFE');
+    assert.ok(cardRes.body.summary.movementCount >= 6);
+    assert.ok(
+      cardRes.body.movements.some(
+        (m) =>
+          m.type === 'OPNAME' &&
+          m.referenceId === finalizeOp.body.opname.opnameNumber &&
+          m.stockAfter === 12
+      )
+    );
+  });
+});
+
+describe('Phase 07 — Camera Barcode Scanner, Validation & Lookup', () => {
+  let p7AdminToken = '';
+  let p7CashierToken = '';
+
+  before(async () => {
+    const adminRes = await api<{ accessToken: string }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier: 'admin', password: 'Admin123!' }),
+    });
+    assert.equal(adminRes.status, 200);
+    p7AdminToken = adminRes.body.accessToken;
+
+    const cashierRes = await api<{ accessToken: string }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier: 'kasir', password: 'Kasir123!' }),
+    });
+    assert.equal(cashierRes.status, 200);
+    p7CashierToken = cashierRes.body.accessToken;
+  });
+
+  it('validates retail 1D formats (EAN-13, EAN-8, UPC-A, UPC-E, Code 128) and enforces QR toggle', () => {
+    // Valid GS1 EAN-13
+    const ean13Body = '899600130118';
+    const validEan13 = `${ean13Body}${computeGs1CheckDigit(ean13Body)}`;
+    const eanRes = validateAndNormalizeBarcode(validEan13, 'ean_13', {
+      allowQr: false,
+      strictCheckDigit: true,
+    });
+    assert.equal(eanRes.valid, true);
+    assert.equal(eanRes.detectedType, 'EAN-13');
+    assert.equal(eanRes.checkDigitValid, true);
+
+    // Invalid GS1 check digit caught when strictCheckDigit is enabled
+    const wrongDigit = Number(validEan13[12]) === 9 ? '0' : String(Number(validEan13[12]) + 1);
+    const badEan13 = `${ean13Body}${wrongDigit}`;
+    const badEanRes = validateAndNormalizeBarcode(badEan13, 'EAN-13', {
+      strictCheckDigit: true,
+    });
+    assert.equal(badEanRes.valid, false);
+    assert.equal(badEanRes.checkDigitValid, false);
+
+    // Valid EAN-8 & UPC-A
+    const validEan8 = `9638507${computeGs1CheckDigit('9638507')}`;
+    assert.equal(verifyGs1CheckDigit(validEan8, 'EAN-8'), true);
+    const ean8Res = validateAndNormalizeBarcode(validEan8, 'ean_8', { strictCheckDigit: true });
+    assert.equal(ean8Res.valid, true);
+    assert.equal(ean8Res.detectedType, 'EAN-8');
+
+    const validUpcA = `03600029145${computeGs1CheckDigit('03600029145')}`;
+    assert.equal(verifyGs1CheckDigit(validUpcA, 'UPC-A'), true);
+    const upcARes = validateAndNormalizeBarcode(validUpcA, 'upc_a', { strictCheckDigit: true });
+    assert.equal(upcARes.valid, true);
+    assert.equal(upcARes.detectedType, 'UPC-A');
+
+    // Valid UPC-E (04252614 -> expands to 042100005264)
+    assert.equal(verifyGs1CheckDigit('04252614', 'UPC-E'), true);
+    const upcERes = validateAndNormalizeBarcode('04252614', 'upc_e', { strictCheckDigit: true });
+    assert.equal(upcERes.valid, true);
+    assert.equal(upcERes.detectedType, 'UPC-E');
+
+    // Code 128 alphanumeric
+    const c128Res = validateAndNormalizeBarcode('BATCH-2026-KASSA', 'code_128');
+    assert.equal(c128Res.valid, true);
+    assert.equal(c128Res.detectedType, 'CODE-128');
+
+    // QR Code blocked when allowQr = false, allowed when allowQr = true
+    const qrBlocked = validateAndNormalizeBarcode('https://kassaritel.id/promo/123', 'qr_code', {
+      allowQr: false,
+    });
+    assert.equal(qrBlocked.valid, false);
+    assert.equal(qrBlocked.detectedType, 'QR');
+
+    const qrAllowed = validateAndNormalizeBarcode('https://kassaritel.id/promo/123', 'qr_code', {
+      allowQr: true,
+    });
+    assert.equal(qrAllowed.valid, true);
+    assert.equal(qrAllowed.detectedType, 'QR');
+
+    // Rejects spaces and control characters
+    assert.equal(validateAndNormalizeBarcode('899 123456', 'CODE-128').valid, false);
+    assert.equal(validateAndNormalizeBarcode('12', 'CODE-128').valid, false);
+  });
+
+  it('prevents duplicate continuous frame scans with cooldown, in-flight lock, and manual reset', () => {
+    const guard = new DuplicateScanGuard(1500);
+    assert.equal(guard.shouldAccept('8998866200315', 1000), true);
+    // Same barcode within 1500ms rejected
+    assert.equal(guard.shouldAccept('8998866200315', 1800), false);
+    assert.ok(guard.getRemainingCooldownMs('8998866200315', 1800) > 0);
+    // Different barcode accepted immediately
+    assert.equal(guard.shouldAccept('8992761139018', 1900), true);
+    // In-flight guard blocks concurrent frames
+    guard.markInFlight('8992761139018');
+    assert.equal(guard.shouldAccept('8996001301180', 1950), false);
+    guard.clearInFlight();
+    // Same barcode accepted after cooldown elapses
+    assert.equal(guard.shouldAccept('8992761139018', 3500), true);
+    // Manual reset allows immediate re-scan
+    guard.reset();
+    assert.equal(guard.shouldAccept('8992761139018', 3510), true);
+  });
+
+  it('gracefully reports camera capability fallback and detects rear camera labels', async () => {
+    const caps = await detectScannerCapabilities();
+    assert.equal(caps.hasCameraApi, false);
+    assert.equal(caps.preferredEngine, 'zxing');
+
+    assert.equal(isRearCameraLabel('Back Dual Camera'), true);
+    assert.equal(isRearCameraLabel('camera2 0, facing back'), true);
+    assert.equal(isRearCameraLabel('Kamera Belakang'), true);
+    assert.equal(isRearCameraLabel('FaceTime HD Camera (Front)'), false);
+  });
+
+  it('supports unknown scanned barcode workflow from 404 lookup to registration and immediate re-scan match', async () => {
+    const unknownCode = '8997777000127';
+
+    // 1. Unknown barcode returns 404
+    const missRes = await api<{ error: string }>(
+      `/api/products/barcode/${encodeURIComponent(unknownCode)}`,
+      { token: p7CashierToken }
+    );
+    assert.equal(missRes.status, 404);
+
+    // 2. Register product with scanned barcode + secondary Code 128 barcode
+    const createRes = await api<{
+      product: { id: string; barcode: string; barcodes: Array<{ barcode: string; barcodeType: string }> };
+    }>('/api/products', {
+      method: 'POST',
+      token: p7AdminToken,
+      body: JSON.stringify({
+        sku: 'SKU-P7-SCAN-01',
+        name: 'Kopi Sachet Scan Camera Uji',
+        category: 'Minuman',
+        unit: 'PACK',
+        costPrice: 1800,
+        sellPrice: 2500,
+        stock: 20,
+        minStock: 5,
+        barcodes: [
+          { barcode: unknownCode, barcodeType: 'EAN-13', isPrimary: true },
+          { barcode: 'KARTON-P7-01', barcodeType: 'CODE-128', isPrimary: false },
+        ],
+      }),
+    });
+    assert.equal(createRes.status, 201);
+
+    // 3. Subsequent scan lookup resolves both primary EAN-13 and secondary CODE-128
+    const hitPrimary = await api<{ product: { id: string; name: string } }>(
+      `/api/products/barcode/${encodeURIComponent(unknownCode)}`,
+      { token: p7CashierToken }
+    );
+    assert.equal(hitPrimary.status, 200);
+    assert.equal(hitPrimary.body.product.id, createRes.body.product.id);
+
+    const hitSecondary = await api<{ product: { id: string } }>(
+      `/api/products/barcode/${encodeURIComponent('karton-p7-01')}`,
+      { token: p7CashierToken }
+    );
+    assert.equal(hitSecondary.status, 200);
+    assert.equal(hitSecondary.body.product.id, createRes.body.product.id);
+  });
+});
+
+describe('Phase 08 — AI Product Recognition, Multi-Signal Ranking & Feedback', () => {
+  const TINY_PNG_BASE64 =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+
+  let p8AdminToken = '';
+  let p8CashierToken = '';
+  const origGeminiKey = process.env.GEMINI_API_KEY;
+
+  before(async () => {
+    const adminRes = await api<{ accessToken: string }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier: 'admin', password: 'Admin123!' }),
+    });
+    assert.equal(adminRes.status, 200);
+    p8AdminToken = adminRes.body.accessToken;
+
+    const cashierRes = await api<{ accessToken: string }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier: 'kasir', password: 'Kasir123!' }),
+    });
+    assert.equal(cashierRes.status, 200);
+    p8CashierToken = cashierRes.body.accessToken;
+  });
+
+  after(() => {
+    unregisterRecognitionProvider('test-vision-mock');
+    if (origGeminiKey === undefined) {
+      delete process.env.GEMINI_API_KEY;
+    } else {
+      process.env.GEMINI_API_KEY = origGeminiKey;
+    }
+  });
+
+  it('normalizes weight/volume units and ranks candidates using multi-signal scoring rather than color alone', () => {
+    const literMeasure = parseMeasureString('1L');
+    assert.deepEqual(literMeasure, { kind: 'volume', valueInBaseUnit: 1000 });
+    const kgMeasure = parseMeasureString('5 kg');
+    assert.deepEqual(kgMeasure, { kind: 'weight', valueInBaseUnit: 5000 });
+
+    const baseSettings = {
+      activeProviderId: 'test-vision-mock',
+      autoAddHighConfidence: false,
+      highConfidenceThreshold: 0.85,
+      mediumConfidenceThreshold: 0.55,
+      lowConfidenceThreshold: 0.35,
+      remoteEndpointUrl: '',
+      requestTimeoutMs: 15000,
+      updatedAt: new Date().toISOString(),
+    };
+
+    const targetProduct = {
+      id: 'prd-mock-1',
+      sku: 'SKU-M1',
+      barcode: '8991111111111',
+      name: 'Teh Botol Sosro Original 250ml',
+      description: '',
+      brandId: 'brd-sosro',
+      brandName: 'Sosro',
+      categoryId: 'cat-minuman',
+      category: 'Minuman',
+      subcategoryId: 'cat-teh-kopi',
+      subcategoryName: 'Teh & Kopi',
+      uomId: 'uom-box',
+      unit: 'BOX',
+      variant: 'Original Kotak',
+      size: '250ml',
+      weight: null,
+      volume: 250,
+      costPrice: 3000,
+      sellPrice: 4000,
+      specialPrice: null,
+      taxCategory: 'STANDARD' as const,
+      stock: 15,
+      minStock: 5,
+      status: 'ACTIVE' as const,
+      primaryImageId: null,
+      primaryImageUrl: null,
+      barcodes: [],
+      images: [],
+      createdAt: '',
+      updatedAt: '',
+    };
+
+    const wrongBrandSameVisual = {
+      ...targetProduct,
+      id: 'prd-mock-2',
+      sku: 'SKU-M2',
+      name: 'Susu Cokelat Ultra Milk 1000ml',
+      brandName: 'Ultra Milk',
+      variant: 'Cokelat',
+      size: '1L',
+      volume: 1000,
+    };
+
+    const ocr = normalizeOcrSignals({
+      productName: 'Teh Botol Sosro Original',
+      brand: 'Sosro',
+      variant: 'Original Kotak',
+      volume: '250ml',
+      packagingType: 'kotak',
+      rawText: 'Teh Botol Sosro Original 250 ml',
+    });
+
+    const queryVec = [0.9, 0.1, 0.2, 0.4];
+    const sharedVec = [0.89, 0.11, 0.2, 0.41];
+
+    const scoreTrue = scoreProductCandidate({
+      product: targetProduct,
+      referenceEmbeddings: [
+        { imageId: 'img-1', imageUrl: '/img1.jpg', isAiReference: true, vector: sharedVec },
+      ],
+      verifiedFeedbackTerms: [],
+      queryEmbedding: queryVec,
+      ocr,
+      settings: baseSettings,
+    });
+
+    const scoreConflicted = scoreProductCandidate({
+      product: wrongBrandSameVisual,
+      referenceEmbeddings: [
+        { imageId: 'img-2', imageUrl: '/img2.jpg', isAiReference: true, vector: sharedVec },
+      ],
+      verifiedFeedbackTerms: [],
+      queryEmbedding: queryVec,
+      ocr,
+      settings: baseSettings,
+    });
+
+    assert.ok(scoreTrue.confidence >= 0.85, `Expected high score, got ${scoreTrue.confidence}`);
+    assert.equal(scoreTrue.confidenceBand, 'HIGH');
+    assert.ok(
+      scoreTrue.confidence > scoreConflicted.confidence + 0.35,
+      `Brand/size/OCR signals must strongly separate ${scoreTrue.confidence} from ${scoreConflicted.confidence}`
+    );
+  });
+
+  it('enforces RBAC & threshold validation and fails honestly without fake results when Gemini key is unavailable', async () => {
+    delete process.env.GEMINI_API_KEY;
+
+    // Cashier cannot modify recognition settings
+    const forbiddenRes = await api<{ error: string }>('/api/recognition/settings', {
+      method: 'PUT',
+      token: p8CashierToken,
+      body: JSON.stringify({ autoAddHighConfidence: true }),
+    });
+    assert.equal(forbiddenRes.status, 403);
+
+    // Invalid threshold ordering rejected (400)
+    const badThresholdRes = await api<{ error: string }>('/api/recognition/settings', {
+      method: 'PUT',
+      token: p8AdminToken,
+      body: JSON.stringify({
+        highConfidenceThreshold: 0.6,
+        mediumConfidenceThreshold: 0.75,
+        lowConfidenceThreshold: 0.4,
+      }),
+    });
+    assert.equal(badThresholdRes.status, 400);
+
+    // Providers report honest unavailable status when GEMINI_API_KEY is not present
+    const provRes = await api<{
+      providers: Array<{ id: string; available: boolean; reason?: string }>;
+    }>('/api/recognition/providers', { token: p8CashierToken });
+    assert.equal(provRes.status, 200);
+    const geminiProv = provRes.body.providers.find((p) => p.id === 'gemini-vision');
+    assert.ok(geminiProv);
+    assert.equal(geminiProv.available, false);
+
+    // Identify returns 503 PROVIDER_UNAVAILABLE and logs ERROR cleanly instead of faking recognition
+    const failIdentify = await api<{ error: string; code?: string }>('/api/recognition/identify', {
+      method: 'POST',
+      token: p8CashierToken,
+      body: JSON.stringify({
+        mimeType: 'image/png',
+        dataBase64: TINY_PNG_BASE64,
+        width: 1,
+        height: 1,
+      }),
+    });
+    assert.equal(failIdentify.status, 503);
+    assert.equal(failIdentify.body.code, 'PROVIDER_UNAVAILABLE');
+
+    const logsRes = await api<{
+      logs: Array<{ outcome: string; providerId: string; errorMessage: string | null }>;
+    }>('/api/recognition/logs?outcome=ERROR&limit=5', { token: p8CashierToken });
+    assert.equal(logsRes.status, 200);
+    assert.ok(logsRes.body.logs.some((l) => l.outcome === 'ERROR' && l.providerId === 'gemini-vision'));
+  });
+
+  it('supports pluggable provider replacement, reference embedding sync, ranked identification, and verified feedback promotion', async () => {
+    // 1. Register a deterministic replaceable provider
+    registerRecognitionProvider({
+      id: 'test-vision-mock',
+      label: 'Test Replaceable Vision Provider',
+      kind: 'local-inference',
+      supportsOcr: true,
+      supportsEmbeddings: true,
+      getStatus: () => ({ available: true, modelName: 'test-vision-v1' }),
+      async embedReferenceImage() {
+        return { vector: [0.92, 0.25, 0.1, 0.3], modelName: 'test-embed-v1' };
+      },
+      async analyzeImage() {
+        return {
+          ocr: normalizeOcrSignals({
+            productName: 'Indomie Goreng Spesial',
+            brand: 'Indofood',
+            variant: 'Goreng Spesial',
+            weight: '85g',
+            size: '85g',
+            packagingType: 'bungkus',
+            rawText: 'Indomie Mi Goreng Spesial 85g Indofood',
+            keywords: ['indomie', 'goreng', '85g'],
+          }),
+          detectedRegion: {
+            x: 0.1,
+            y: 0.1,
+            width: 0.8,
+            height: 0.8,
+            label: 'Indomie Goreng',
+            confidence: 0.94,
+          },
+          embedding: [0.91, 0.26, 0.11, 0.29],
+          embeddingModel: 'test-embed-v1',
+          analysisModel: 'test-vision-v1',
+        };
+      },
+    });
+
+    // 2. Upload AI reference image on prd-01 (Indomie Goreng)
+    const uploadImg = await api<{
+      product: { id: string; images: Array<{ id: string; aiEmbeddingStatus: string }> };
+    }>('/api/products/prd-01/images', {
+      method: 'POST',
+      token: p8AdminToken,
+      body: JSON.stringify({
+        fileName: 'indomie-front.png',
+        mimeType: 'image/png',
+        dataBase64: TINY_PNG_BASE64,
+        isPrimary: true,
+        isAiReference: true,
+        referenceAngle: 'front',
+      }),
+    });
+    assert.equal(uploadImg.status, 201);
+    const refImgId = uploadImg.body.product.images[0].id;
+    assert.equal(uploadImg.body.product.images[0].aiEmbeddingStatus, 'PENDING');
+
+    // 3. Switch active provider to test-vision-mock & disable auto-add first
+    const updateSet = await api<{ settings: { activeProviderId: string } }>(
+      '/api/recognition/settings',
+      {
+        method: 'PUT',
+        token: p8AdminToken,
+        body: JSON.stringify({
+          activeProviderId: 'test-vision-mock',
+          autoAddHighConfidence: false,
+          highConfidenceThreshold: 0.82,
+          mediumConfidenceThreshold: 0.55,
+          lowConfidenceThreshold: 0.35,
+        }),
+      }
+    );
+    assert.equal(updateSet.status, 200);
+    assert.equal(updateSet.body.settings.activeProviderId, 'test-vision-mock');
+
+    // 4. Sync reference image embeddings -> status becomes READY
+    const syncRes = await api<{
+      summary: { providerId: string; processed: number; readyCount: number; failedCount: number };
+      store: { products: Array<{ id: string; images: Array<{ id: string; aiEmbeddingStatus: string }> }> };
+    }>('/api/recognition/references/sync', {
+      method: 'POST',
+      token: p8AdminToken,
+      body: JSON.stringify({ productId: 'prd-01' }),
+    });
+    assert.equal(syncRes.status, 200);
+    assert.equal(syncRes.body.summary.failedCount, 0);
+    assert.ok(syncRes.body.summary.readyCount >= 1);
+    const syncedProd = syncRes.body.store.products.find((p) => p.id === 'prd-01');
+    assert.equal(
+      syncedProd?.images.find((i) => i.id === refImgId)?.aiEmbeddingStatus,
+      'READY'
+    );
+
+    // 5. Run identification as cashier -> matches prd-01 with HIGH confidence & autoAddEligible=false (setting is false)
+    const idRes = await api<{
+      result: {
+        logId: string;
+        capturedImageUrl: string;
+        confidenceBand: string;
+        autoAddEligible: boolean;
+        bestMatch: { productId: string; confidence: number; signals: { imageSimilarity: number; ocrTextSimilarity: number } };
+        candidates: Array<{ productId: string }>;
+      };
+    }>('/api/recognition/identify', {
+      method: 'POST',
+      token: p8CashierToken,
+      body: JSON.stringify({
+        mimeType: 'image/png',
+        dataBase64: TINY_PNG_BASE64,
+        width: 320,
+        height: 240,
+        context: 'POS_CASHIER',
+      }),
+    });
+    assert.equal(idRes.status, 200);
+    assert.equal(idRes.body.result.bestMatch.productId, 'prd-01');
+    assert.equal(idRes.body.result.confidenceBand, 'HIGH');
+    assert.equal(idRes.body.result.autoAddEligible, false);
+    assert.ok(idRes.body.result.bestMatch.signals.imageSimilarity > 0.9);
+    assert.ok(idRes.body.result.bestMatch.signals.ocrTextSimilarity > 0.6);
+
+    // Verify captured image is served safely via /api/uploads/recognition/
+    const capRes = await fetch(`${baseUrl}${idRes.body.result.capturedImageUrl}`);
+    assert.equal(capRes.status, 200);
+    assert.equal(capRes.headers.get('content-type'), 'image/png');
+
+    // 6. Enable autoAddHighConfidence -> next HIGH confidence identification marks autoAddEligible=true
+    await api('/api/recognition/settings', {
+      method: 'PUT',
+      token: p8AdminToken,
+      body: JSON.stringify({ autoAddHighConfidence: true }),
+    });
+    const idAutoRes = await api<{
+      result: { logId: string; confidenceBand: string; autoAddEligible: boolean };
+    }>('/api/recognition/identify', {
+      method: 'POST',
+      token: p8CashierToken,
+      body: JSON.stringify({
+        mimeType: 'image/png',
+        dataBase64: TINY_PNG_BASE64,
+        width: 320,
+        height: 240,
+      }),
+    });
+    assert.equal(idAutoRes.status, 200);
+    assert.equal(idAutoRes.body.result.confidenceBand, 'HIGH');
+    assert.equal(idAutoRes.body.result.autoAddEligible, true);
+
+    // 7. Submit verified feedback & promote captured image into product_images as AI reference (Admin)
+    const imgCountBefore = syncedProd?.images.length ?? 0;
+    const fbRes = await api<{
+      log: { outcome: string; isVerifiedFeedback: boolean; selectedProductId: string };
+      store: { products: Array<{ id: string; images: Array<{ isAiReference: boolean }> }> };
+    }>(`/api/recognition/logs/${idAutoRes.body.result.logId}/feedback`, {
+      method: 'POST',
+      token: p8AdminToken,
+      body: JSON.stringify({
+        outcome: 'CONFIRMED',
+        selectedProductId: 'prd-01',
+        promoteAsReferenceImage: true,
+        referenceAngle: 'front',
+        notes: 'Terverifikasi kasir',
+      }),
+    });
+    assert.equal(fbRes.status, 200);
+    assert.equal(fbRes.body.log.outcome, 'CONFIRMED');
+    assert.equal(fbRes.body.log.isVerifiedFeedback, true);
+    const updatedProd = fbRes.body.store.products.find((p) => p.id === 'prd-01');
+    assert.equal(updatedProd?.images.length, imgCountBefore + 1);
+
+    // Restore default provider setting cleanly
+    await api('/api/recognition/settings', {
+      method: 'PUT',
+      token: p8AdminToken,
+      body: JSON.stringify({
+        activeProviderId: 'gemini-vision',
+        autoAddHighConfidence: false,
+      }),
+    });
+  });
+});
+
+describe('Phase 09 — Customer Management, Loyalty Points & Promotion Engine', () => {
+  let p9AdminToken = '';
+  let p9CashierToken = '';
+  let p9CustomerId = '';
+  let p9MemberNo = '';
+  let p9PromoBundleId = '';
+  let p9PromoBxGyId = '';
+  let p9PromoNonStackId = '';
+  let p9ProdAId = '';
+  let p9ProdBId = '';
+
+  before(async () => {
+    const adminRes = await api<{ accessToken: string }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier: 'admin', password: 'Admin123!' }),
+    });
+    assert.equal(adminRes.status, 200);
+    p9AdminToken = adminRes.body.accessToken;
+
+    const cashierRes = await api<{ accessToken: string }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier: 'kasir', password: 'Kasir123!' }),
+    });
+    assert.equal(cashierRes.status, 200);
+    p9CashierToken = cashierRes.body.accessToken;
+
+    // Create two clean test products so pricing is 100% deterministic
+    const prodA = await api<{ product: { id: string } }>('/api/products', {
+      method: 'POST',
+      token: p9AdminToken,
+      body: JSON.stringify({
+        sku: 'SKU-P9-TEA-01',
+        barcode: '8999090000112',
+        name: 'Teh Uji Promo 350ml',
+        category: 'Minuman',
+        unit: 'BOTTLE',
+        costPrice: 3000,
+        sellPrice: 5000,
+        stock: 60,
+        minStock: 5,
+        taxCategory: 'EXEMPT',
+      }),
+    });
+    assert.equal(prodA.status, 201);
+    p9ProdAId = prodA.body.product.id;
+
+    const prodB = await api<{ product: { id: string } }>('/api/products', {
+      method: 'POST',
+      token: p9AdminToken,
+      body: JSON.stringify({
+        sku: 'SKU-P9-SNACK-02',
+        barcode: '8999090000228',
+        name: 'Biskuit Uji Bundle 120g',
+        category: 'Makanan Ringan',
+        unit: 'PACK',
+        costPrice: 6000,
+        sellPrice: 10000,
+        stock: 60,
+        minStock: 5,
+        taxCategory: 'EXEMPT',
+      }),
+    });
+    assert.equal(prodB.status, 201);
+    p9ProdBId = prodB.body.product.id;
+  });
+
+  it('supports Customer CRUD, duplicate membershipNumber prevention, status toggle, and optional guest checkout', async () => {
+    const createCust = await api<{
+      customer: { id: string; code: string; membershipNumber: string; loyaltyPoints: number; isActive: boolean };
+    }>('/api/customers', {
+      method: 'POST',
+      token: p9AdminToken,
+      body: JSON.stringify({
+        name: 'Andi Pratama P9',
+        membershipNumber: 'MBR-P9-001',
+        phone: '081900011122',
+        email: 'andi.p9@pelanggan.id',
+        address: 'Jl. Sudirman Kav 5',
+        notes: 'Member prioritas',
+      }),
+    });
+    assert.equal(createCust.status, 201);
+    assert.equal(createCust.body.customer.membershipNumber, 'MBR-P9-001');
+    assert.equal(createCust.body.customer.loyaltyPoints, 0);
+    p9CustomerId = createCust.body.customer.id;
+    p9MemberNo = createCust.body.customer.membershipNumber;
+
+    // Duplicate membershipNumber rejected with 409
+    const dupCust = await api<{ error: string }>('/api/customers', {
+      method: 'POST',
+      token: p9AdminToken,
+      body: JSON.stringify({
+        name: 'Duplikat Member',
+        membershipNumber: p9MemberNo,
+      }),
+    });
+    assert.equal(dupCust.status, 409);
+
+    // Search by membership number
+    const searchCust = await api<{ customers: Array<{ id: string }> }>(
+      `/api/customers?search=${p9MemberNo}`,
+      { token: p9CashierToken }
+    );
+    assert.equal(searchCust.status, 200);
+    assert.ok(searchCust.body.customers.some((c) => c.id === p9CustomerId));
+
+    // Edit customer profile (Admin)
+    const editCust = await api<{ customer: { name: string; address: string } }>(
+      `/api/customers/${p9CustomerId}`,
+      {
+        method: 'PUT',
+        token: p9AdminToken,
+        body: JSON.stringify({ name: 'Andi Pratama Verified', address: 'Jl. Thamrin No. 10' }),
+      }
+    );
+    assert.equal(editCust.status, 200);
+    assert.equal(editCust.body.customer.name, 'Andi Pratama Verified');
+
+    // Deactivate customer -> checkout referencing inactive customer is rejected (400)
+    const deact = await api<{ customer: { isActive: boolean } }>(
+      `/api/customers/${p9CustomerId}/status`,
+      {
+        method: 'PATCH',
+        token: p9AdminToken,
+        body: JSON.stringify({ isActive: false }),
+      }
+    );
+    assert.equal(deact.status, 200);
+    assert.equal(deact.body.customer.isActive, false);
+
+    const inactiveCheckout = await api<{ error: string }>('/api/transactions', {
+      method: 'POST',
+      token: p9CashierToken,
+      body: JSON.stringify({
+        customerId: p9CustomerId,
+        items: [{ productId: p9ProdAId, qty: 1 }],
+        applyTax: false,
+        paymentMethod: 'Tunai',
+        cashReceived: 10000,
+      }),
+    });
+    assert.equal(inactiveCheckout.status, 400);
+
+    // Re-activate customer
+    const react = await api<{ customer: { isActive: boolean } }>(
+      `/api/customers/${p9CustomerId}/status`,
+      {
+        method: 'PATCH',
+        token: p9AdminToken,
+        body: JSON.stringify({ isActive: true }),
+      }
+    );
+    assert.equal(react.status, 200);
+
+    // Optional guest transaction (customerId: null) still succeeds cleanly
+    const guestTrx = await api<{
+      transaction: { customerId: string | null; customerName: string; loyaltyPointsEarned: number };
+    }>('/api/transactions', {
+      method: 'POST',
+      token: p9CashierToken,
+      body: JSON.stringify({
+        customerId: null,
+        items: [{ productId: p9ProdAId, qty: 1 }],
+        applyTax: false,
+        paymentMethod: 'Tunai',
+        cashReceived: 5000,
+      }),
+    });
+    assert.equal(guestTrx.status, 201);
+    assert.equal(guestTrx.body.transaction.customerId, null);
+    assert.equal(guestTrx.body.transaction.customerName, 'Pelanggan Umum');
+    assert.equal(guestTrx.body.transaction.loyaltyPointsEarned, 0);
+  });
+
+  it('earns loyalty points on checkout, aggregates customer metrics, redeems points with BigInt accuracy, and records adjustments', async () => {
+    // 1. Member spends Rp 100.000 (10 x 10.000) -> default 1 poin / Rp 10.000 => earns 10 points
+    const earnTrx = await api<{
+      transaction: { id: string; total: number; loyaltyPointsEarned: number };
+    }>('/api/transactions', {
+      method: 'POST',
+      token: p9CashierToken,
+      body: JSON.stringify({
+        customerId: p9CustomerId,
+        items: [{ productId: p9ProdBId, qty: 10 }],
+        applyTax: false,
+        paymentMethod: 'Tunai',
+        cashReceived: 100000,
+      }),
+    });
+    assert.equal(earnTrx.status, 201);
+    assert.equal(earnTrx.body.transaction.total, 100000);
+    assert.equal(earnTrx.body.transaction.loyaltyPointsEarned, 10);
+
+    // Manual adjust +20 points -> balance becomes 30
+    const adjRes = await api<{ customer: { loyaltyPoints: number } }>(
+      `/api/customers/${p9CustomerId}/loyalty/adjust`,
+      {
+        method: 'POST',
+        token: p9AdminToken,
+        body: JSON.stringify({ pointsDelta: 20, notes: 'Bonus registrasi member' }),
+      }
+    );
+    assert.equal(adjRes.status, 200);
+    assert.equal(adjRes.body.customer.loyaltyPoints, 30);
+
+    // Attempting to redeem 30 points (Rp 3.000) on Rp 5.000 cart exceeds maxRedeemPercent (50% = Rp 2.500) -> 400
+    const overRedeem = await api<{ error: string }>('/api/pos/calculate', {
+      method: 'POST',
+      token: p9CashierToken,
+      body: JSON.stringify({
+        customerId: p9CustomerId,
+        items: [{ productId: p9ProdAId, qty: 1 }],
+        loyaltyPointsToRedeem: 30,
+        applyTax: false,
+      }),
+    });
+    assert.equal(overRedeem.status, 400);
+
+    // Valid redemption: 20 points (Rp 2.000) on Rp 10.000 cart (2 x 5.000) => net total Rp 8.000
+    const redeemTrx = await api<{
+      transaction: {
+        total: number;
+        loyaltyPointsRedeemed: number;
+        loyaltyDiscountAmount: number;
+        loyaltyPointsEarned: number;
+      };
+    }>('/api/transactions', {
+      method: 'POST',
+      token: p9CashierToken,
+      body: JSON.stringify({
+        customerId: p9CustomerId,
+        items: [{ productId: p9ProdAId, qty: 2 }],
+        loyaltyPointsToRedeem: 20,
+        applyTax: false,
+        paymentMethod: 'Tunai',
+        cashReceived: 10000,
+      }),
+    });
+    assert.equal(redeemTrx.status, 201);
+    assert.equal(redeemTrx.body.transaction.loyaltyPointsRedeemed, 20);
+    assert.equal(redeemTrx.body.transaction.loyaltyDiscountAmount, 2000);
+    assert.equal(redeemTrx.body.transaction.total, 8000);
+    assert.equal(redeemTrx.body.transaction.loyaltyPointsEarned, 0);
+
+    // Verify customer detail metrics & loyalty ledger
+    const detail = await api<{
+      customer: {
+        loyaltyPoints: number;
+        totalPointsEarned: number;
+        totalPointsRedeemed: number;
+        totalSpending: number;
+        transactionCount: number;
+        lastPurchaseDate: string | null;
+      };
+      transactions: Array<{ id: string }>;
+      loyaltyHistory: Array<{ type: string; pointsDelta: number }>;
+    }>(`/api/customers/${p9CustomerId}`, { token: p9CashierToken });
+    assert.equal(detail.status, 200);
+    assert.equal(detail.body.customer.loyaltyPoints, 10);
+    assert.equal(detail.body.customer.totalPointsEarned, 30);
+    assert.equal(detail.body.customer.totalPointsRedeemed, 20);
+    assert.equal(detail.body.customer.totalSpending, 108000);
+    assert.equal(detail.body.customer.transactionCount, 2);
+    assert.ok(detail.body.customer.lastPurchaseDate);
+    assert.equal(detail.body.transactions.length, 2);
+    assert.ok(detail.body.loyaltyHistory.some((l) => l.type === 'EARN' && l.pointsDelta === 10));
+    assert.ok(detail.body.loyaltyHistory.some((l) => l.type === 'ADJUST' && l.pointsDelta === 20));
+    assert.ok(detail.body.loyaltyHistory.some((l) => l.type === 'REDEEM' && l.pointsDelta === -20));
+  });
+
+  it('validates promotion rules, evaluates PRODUCT/CATEGORY/TRANSACTION/BUY_X_GET_Y/BUNDLE promotions without PIN, and enforces stacking & discount caps', async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const future = new Date(Date.now() + 30 * 86400_000).toISOString().slice(0, 10);
+    const past = new Date(Date.now() - 10 * 86400_000).toISOString().slice(0, 10);
+
+    // 1. Validation checks: endDate < startDate -> 400
+    const badDate = await api<{ error: string }>('/api/promotions', {
+      method: 'POST',
+      token: p9AdminToken,
+      body: JSON.stringify({
+        code: 'BADDATE',
+        name: 'Tanggal Terbalik',
+        promoType: 'PERCENT',
+        scope: 'TRANSACTION',
+        discountValue: 10,
+        startDate: today,
+        endDate: past,
+      }),
+    });
+    assert.equal(badDate.status, 400);
+
+    // PERCENT > 100 -> 400
+    const badPct = await api<{ error: string }>('/api/promotions', {
+      method: 'POST',
+      token: p9AdminToken,
+      body: JSON.stringify({
+        code: 'BADPCT',
+        name: 'Persen Berlebih',
+        promoType: 'PERCENT',
+        scope: 'TRANSACTION',
+        discountValue: 150,
+        startDate: today,
+        endDate: future,
+      }),
+    });
+    assert.equal(badPct.status, 400);
+
+    // PRODUCT scope without targets -> 400
+    const noTarget = await api<{ error: string }>('/api/promotions', {
+      method: 'POST',
+      token: p9AdminToken,
+      body: JSON.stringify({
+        code: 'NOTARGET',
+        name: 'Tanpa Target',
+        promoType: 'PERCENT',
+        scope: 'PRODUCT',
+        discountValue: 10,
+        startDate: today,
+        endDate: future,
+        targets: [],
+      }),
+    });
+    assert.equal(noTarget.status, 400);
+
+    // 2. Create BUY 2 GET 1 on Prod A (5000/ea -> buy 3 pays 10000, discount 5000), stackable
+    const bxgyRes = await api<{ promotion: { id: string } }>('/api/promotions', {
+      method: 'POST',
+      token: p9AdminToken,
+      body: JSON.stringify({
+        code: 'TEAB2G1',
+        name: 'Teh Beli 2 Gratis 1',
+        promoType: 'BUY_X_GET_Y',
+        scope: 'PRODUCT',
+        discountValue: 0,
+        startDate: today,
+        endDate: future,
+        stackable: true,
+        priority: 5,
+        ruleConfig: { buyQty: 2, getQty: 1, getDiscountPercent: 100 },
+        targets: [{ targetType: 'PRODUCT', targetId: p9ProdAId, requiredQty: 1 }],
+      }),
+    });
+    assert.equal(bxgyRes.status, 201);
+    p9PromoBxGyId = bxgyRes.body.promotion.id;
+
+    // 3. Create BUNDLE (1x Prod A (5000) + 1x Prod B (10000) = 15000 -> bundlePrice 12500, saves 2500/set), stackable
+    const bundleRes = await api<{ promotion: { id: string } }>('/api/promotions', {
+      method: 'POST',
+      token: p9AdminToken,
+      body: JSON.stringify({
+        code: 'PAKETTEH',
+        name: 'Paket Teh + Biskuit Hemat',
+        promoType: 'BUNDLE',
+        scope: 'BUNDLE',
+        discountValue: 12500,
+        startDate: today,
+        endDate: future,
+        stackable: true,
+        priority: 15,
+        ruleConfig: { bundlePrice: 12500 },
+        targets: [
+          { targetType: 'PRODUCT', targetId: p9ProdAId, requiredQty: 1 },
+          { targetType: 'PRODUCT', targetId: p9ProdBId, requiredQty: 1 },
+        ],
+      }),
+    });
+    assert.equal(bundleRes.status, 201);
+    p9PromoBundleId = bundleRes.body.promotion.id;
+
+    // 4. Create Non-stackable promo
+    const nonStackRes = await api<{ promotion: { id: string } }>('/api/promotions', {
+      method: 'POST',
+      token: p9AdminToken,
+      body: JSON.stringify({
+        code: 'NONSTACK5K',
+        name: 'Potongan Eksklusif Rp 5.000',
+        promoType: 'FIXED_AMOUNT',
+        scope: 'TRANSACTION',
+        discountValue: 5000,
+        minPurchaseAmount: 10000,
+        startDate: today,
+        endDate: future,
+        stackable: false,
+        priority: 30,
+      }),
+    });
+    assert.equal(nonStackRes.status, 201);
+    p9PromoNonStackId = nonStackRes.body.promotion.id;
+
+    // Stacking non-stackable promo with another promo returns 400 PROMO_NOT_STACKABLE
+    const stackViolation = await api<{ code: string }>('/api/pos/calculate', {
+      method: 'POST',
+      token: p9CashierToken,
+      body: JSON.stringify({
+        items: [
+          { productId: p9ProdAId, qty: 3 },
+          { productId: p9ProdBId, qty: 1 },
+        ],
+        selectedPromotionIds: [p9PromoBxGyId, p9PromoNonStackId],
+        applyTax: false,
+      }),
+    });
+    assert.equal(stackViolation.status, 400);
+    assert.equal(stackViolation.body.code, 'PROMO_NOT_STACKABLE');
+
+    // Combining manual discount with promo when allowManualWithPromo=false returns 400 MANUAL_WITH_PROMO_NOT_ALLOWED
+    const manualPromoConflict = await api<{ code: string }>('/api/pos/calculate', {
+      method: 'POST',
+      token: p9CashierToken,
+      body: JSON.stringify({
+        items: [{ productId: p9ProdAId, qty: 3 }],
+        selectedPromotionIds: [p9PromoBxGyId],
+        transactionDiscountType: 'AMOUNT',
+        transactionDiscountValue: 1000,
+        applyTax: false,
+      }),
+    });
+    assert.equal(manualPromoConflict.status, 400);
+    assert.equal(manualPromoConflict.body.code, 'MANUAL_WITH_PROMO_NOT_ALLOWED');
+
+    // Cashier applies stacked BXGY (5000) + Bundle (2500) on 3x Prod A (15000) + 1x Prod B (10000) = 25000 gross
+    // Net total = 25000 - 5000 - 2500 = 17500, WITHOUT requiring Supervisor PIN!
+    const promoCheckout = await api<{
+      transaction: {
+        subtotal: number;
+        promotionDiscountAmount: number;
+        total: number;
+        appliedPromotions: Array<{ code: string; discountAmount: number }>;
+      };
+    }>('/api/transactions', {
+      method: 'POST',
+      token: p9CashierToken,
+      body: JSON.stringify({
+        items: [
+          { productId: p9ProdAId, qty: 3 },
+          { productId: p9ProdBId, qty: 1 },
+        ],
+        selectedPromotionIds: [p9PromoBxGyId, p9PromoBundleId],
+        applyTax: false,
+        paymentMethod: 'Tunai',
+        cashReceived: 20000,
+      }),
+    });
+    assert.equal(promoCheckout.status, 201);
+    assert.equal(promoCheckout.body.transaction.subtotal, 25000);
+    assert.equal(promoCheckout.body.transaction.promotionDiscountAmount, 7500);
+    assert.equal(promoCheckout.body.transaction.total, 17500);
+    assert.equal(promoCheckout.body.transaction.appliedPromotions.length, 2);
+
+    // Check maxAuthorizedDiscountPercent enforcement (set to 30%, attempt 50% manual discount even as Admin -> 400 DISCOUNT_LIMIT_EXCEEDED)
+    await api('/api/settings', {
+      method: 'PUT',
+      token: p9AdminToken,
+      body: JSON.stringify({ maxAuthorizedDiscountPercent: 30 }),
+    });
+    const overLimit = await api<{ code: string }>('/api/pos/calculate', {
+      method: 'POST',
+      token: p9AdminToken,
+      body: JSON.stringify({
+        items: [{ productId: p9ProdBId, qty: 2 }],
+        transactionDiscountType: 'PERCENT',
+        transactionDiscountValue: 50,
+        applyTax: false,
+      }),
+    });
+    assert.equal(overLimit.status, 400);
+    assert.equal(overLimit.body.code, 'DISCOUNT_LIMIT_EXCEEDED');
+
+    // Restore maxAuthorizedDiscountPercent = 100
+    await api('/api/settings', {
+      method: 'PUT',
+      token: p9AdminToken,
+      body: JSON.stringify({ maxAuthorizedDiscountPercent: 100 }),
+    });
+  });
+
+  it('enforces RBAC permissions on customer edit, loyalty adjustments, loyalty settings, and promotion management', async () => {
+    const denyCustEdit = await api<{ error: string }>(`/api/customers/${p9CustomerId}`, {
+      method: 'PUT',
+      token: p9CashierToken,
+      body: JSON.stringify({ name: 'Ubah Tanpa Izin' }),
+    });
+    assert.equal(denyCustEdit.status, 403);
+
+    const denyPointAdj = await api<{ error: string }>(
+      `/api/customers/${p9CustomerId}/loyalty/adjust`,
+      {
+        method: 'POST',
+        token: p9CashierToken,
+        body: JSON.stringify({ pointsDelta: 100 }),
+      }
+    );
+    assert.equal(denyPointAdj.status, 403);
+
+    const denyPromoCreate = await api<{ error: string }>('/api/promotions', {
+      method: 'POST',
+      token: p9CashierToken,
+      body: JSON.stringify({
+        code: 'KASIRPROMO',
+        name: 'Promo Tidak Berizin',
+        promoType: 'PERCENT',
+        scope: 'TRANSACTION',
+        discountValue: 10,
+        startDate: '2026-01-01',
+        endDate: '2026-12-31',
+      }),
+    });
+    assert.equal(denyPromoCreate.status, 403);
+
+    const denyLoyaltyCfg = await api<{ error: string }>('/api/loyalty/settings', {
+      method: 'PUT',
+      token: p9CashierToken,
+      body: JSON.stringify({ enabled: false }),
+    });
+    assert.equal(denyLoyaltyCfg.status, 403);
+  });
+});
 
 

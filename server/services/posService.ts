@@ -22,7 +22,9 @@ import {
   queryTransactions as queryPhase4Transactions,
   type CheckoutInput,
 } from './checkoutService.ts';
+import { getLoyaltySettings } from './customerService.ts';
 import { ServiceError } from './errors.ts';
+import { listPromotions } from './promotionService.ts';
 import type {
   BarcodeType,
   Product,
@@ -57,37 +59,49 @@ function queryStockMovements(limit = 300): StockMovement[] {
   const db = getDb();
   const rows = db
     .prepare(`
-      SELECT id, product_id, product_name, barcode, type, qty_delta, stock_before, stock_after,
-             reference_id, notes, created_at
+      SELECT id, product_id, sku, product_name, barcode, type, qty_delta, stock_before, stock_after,
+             unit_cost, reference_id, reason, notes, actor_user_id, actor_name, movement_date, created_at
       FROM stock_movements
-      ORDER BY created_at DESC
+      ORDER BY created_at DESC, rowid DESC
       LIMIT ?
     `)
     .all(limit) as Array<{
     id: string;
     product_id: string;
+    sku: string;
     product_name: string;
     barcode: string;
     type: StockMovementType;
     qty_delta: number;
     stock_before: number;
     stock_after: number;
+    unit_cost: number | null;
     reference_id: string;
+    reason: string;
     notes: string;
+    actor_user_id: string | null;
+    actor_name: string;
+    movement_date: string;
     created_at: string;
   }>;
 
   return rows.map((r) => ({
     id: r.id,
     productId: r.product_id,
+    sku: r.sku || undefined,
     productName: r.product_name,
     barcode: r.barcode,
     type: r.type,
     qtyDelta: r.qty_delta,
     stockBefore: r.stock_before,
     stockAfter: r.stock_after,
+    unitCost: r.unit_cost,
     referenceId: r.reference_id,
+    reason: r.reason || undefined,
     notes: r.notes,
+    actorUserId: r.actor_user_id,
+    actorName: r.actor_name || 'Sistem',
+    movementDate: r.movement_date || r.created_at,
     createdAt: r.created_at,
   }));
 }
@@ -97,7 +111,9 @@ export function querySettings(): StoreSettings {
   const row = db
     .prepare(`
       SELECT store_name, store_address, store_phone, receipt_footer, tax_enabled, tax_rate, cashier_name,
-             store_logo_url, receipt_paper_width, receipt_show_logo, receipt_show_qr, receipt_header_note
+             store_logo_url, receipt_paper_width, receipt_show_logo, receipt_show_qr, receipt_header_note,
+             allow_negative_stock, allow_promo_stacking, allow_manual_with_promo,
+             max_cashier_discount_percent, max_authorized_discount_percent
       FROM store_settings
       WHERE id = 1
     `)
@@ -115,6 +131,11 @@ export function querySettings(): StoreSettings {
         receipt_show_logo: number;
         receipt_show_qr: number;
         receipt_header_note: string;
+        allow_negative_stock: number;
+        allow_promo_stacking?: number;
+        allow_manual_with_promo?: number;
+        max_cashier_discount_percent?: number;
+        max_authorized_discount_percent?: number;
       }
     | undefined;
 
@@ -140,6 +161,11 @@ export function querySettings(): StoreSettings {
     receiptShowLogo: row.receipt_show_logo === 1,
     receiptShowQr: row.receipt_show_qr === 1,
     receiptHeaderNote: row.receipt_header_note || '',
+    allowNegativeStock: row.allow_negative_stock === 1,
+    allowPromoStacking: (row.allow_promo_stacking ?? 1) === 1,
+    allowManualWithPromo: (row.allow_manual_with_promo ?? 0) === 1,
+    maxCashierDiscountPercent: Number(row.max_cashier_discount_percent ?? 25),
+    maxAuthorizedDiscountPercent: Number(row.max_authorized_discount_percent ?? 100),
   };
 }
 
@@ -149,8 +175,19 @@ export function getBootstrapData(viewer?: UserSummary): StoreData {
     !viewer ||
     viewer.permissions.includes('products:view') ||
     viewer.permissions.includes('pos:view') ||
-    viewer.permissions.includes('catalog:manage');
+    viewer.permissions.includes('catalog:manage') ||
+    viewer.permissions.includes('promotions:manage');
   const canViewPos = !viewer || viewer.permissions.includes('pos:view');
+  const canViewCustomers =
+    !viewer ||
+    canViewPos ||
+    viewer.permissions.includes('customers:view') ||
+    viewer.permissions.includes('transactions:view');
+  const canViewPromotions =
+    !viewer ||
+    canViewPos ||
+    viewer.permissions.includes('promotions:view') ||
+    viewer.permissions.includes('promotions:manage');
   const canViewTransactions =
     !viewer ||
     viewer.permissions.includes('transactions:view') ||
@@ -164,7 +201,9 @@ export function getBootstrapData(viewer?: UserSummary): StoreData {
     categories: canViewProducts ? listCategories() : [],
     brands: canViewProducts ? listBrands() : [],
     uoms: canViewProducts ? listUoms() : [],
-    customers: canViewPos || canViewTransactions ? listCustomers() : [],
+    customers: canViewCustomers ? listCustomers() : [],
+    promotions: canViewPromotions ? listPromotions() : [],
+    loyaltySettings: getLoyaltySettings(),
     paymentMethods: canViewPos || canViewTransactions ? listPaymentMethods(true) : [],
     transactions: canViewTransactions ? queryPhase4Transactions(200, true) : [],
     heldTransactions: canViewPos ? listHeldTransactions() : [],
@@ -596,15 +635,21 @@ export function createProduct(
     if (initialStock > 0) {
       db.prepare(`
         INSERT INTO stock_movements (
-          id, product_id, product_name, barcode, type, qty_delta, stock_before, stock_after, reference_id, notes, created_at
-        ) VALUES (?, ?, ?, ?, 'STOK_AWAL', ?, 0, ?, 'INIT-SKU', 'Stok awal pendaftaran produk baru', ?)
+          id, product_id, sku, product_name, barcode, type, qty_delta, stock_before, stock_after,
+          unit_cost, reference_id, reason, notes, actor_user_id, actor_name, movement_date, created_at
+        ) VALUES (?, ?, ?, ?, ?, 'STOK_AWAL', ?, 0, ?, ?, 'INIT-SKU', 'Stok Awal', 'Stok awal pendaftaran produk baru', ?, ?, ?, ?)
       `).run(
         `mov-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         productId,
+        sku,
         name,
         primaryBarcode,
         initialStock,
         initialStock,
+        costPrice,
+        actor?.id ?? null,
+        actor?.fullName || querySettings().cashierName,
+        nowIso,
         nowIso
       );
     }
@@ -696,6 +741,13 @@ export function updateProduct(
           return val !== null && val > 0 ? Math.round(val) : null;
         })()
       : current.specialPrice;
+
+  if (input.stock !== undefined && Number(input.stock) !== current.stock) {
+    throw new ServiceError(
+      400,
+      'Stok produk tidak dapat diubah langsung melalui edit produk; gunakan Barang Masuk, Penyesuaian Stok, atau Stok Opname.'
+    );
+  }
 
   const minStock =
     input.minStock !== undefined
@@ -842,6 +894,24 @@ export function setProductStatus(
 export function deleteProduct(id: string, actor?: UserSummary): { store: StoreData } {
   const db = getDb();
   const target = getProductById(id);
+
+  const movCount = (
+    db.prepare('SELECT COUNT(*) as cnt FROM stock_movements WHERE product_id = ?').get(id) as {
+      cnt: number;
+    }
+  ).cnt;
+  const trxCount = (
+    db.prepare('SELECT COUNT(*) as cnt FROM transaction_items WHERE product_id = ?').get(id) as {
+      cnt: number;
+    }
+  ).cnt;
+  if (movCount > 0 || trxCount > 0) {
+    throw new ServiceError(
+      409,
+      'Produk yang memiliki riwayat mutasi stok atau transaksi tidak dapat dihapus agar histori stok tetap terjaga. Nonaktifkan status produk sebagai gantinya.'
+    );
+  }
+
   const imagePaths = db
     .prepare('SELECT storage_path FROM product_images WHERE product_id = ?')
     .all(id) as Array<{ storage_path: string }>;
@@ -915,8 +985,8 @@ export function adjustStock(
   let qtyDelta = 0;
   let adjustmentType: StockMovementType;
 
-  if (input.type === 'RESTOK') {
-    adjustmentType = 'RESTOK';
+  if (input.type === 'RESTOK' || input.type === 'STOCK_IN') {
+    adjustmentType = input.type === 'STOCK_IN' ? 'STOCK_IN' : 'RESTOK';
     const rawQty = Math.floor(assertFiniteNonNegative(input.qty, 'Jumlah restok'));
     if (rawQty <= 0) {
       throw new ServiceError(400, 'Jumlah restok harus minimal 1.');
@@ -935,19 +1005,26 @@ export function adjustStock(
   const nowIso = new Date().toISOString();
   const dateStamp = nowIso.slice(0, 10).replace(/-/g, '');
   const notesText = typeof input.notes === 'string' ? input.notes.trim() : '';
+  const actorName = actor?.fullName || querySettings().cashierName;
   const movement: StockMovement = {
     id: `mov-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     productId: product.id,
+    sku: product.sku,
     productName: product.name,
     barcode: product.barcode,
     type: adjustmentType,
     qtyDelta,
     stockBefore,
     stockAfter,
-    referenceId: adjustmentType === 'RESTOK' ? `RST-${dateStamp}` : `OPN-${dateStamp}`,
+    unitCost: product.costPrice,
+    referenceId: adjustmentType === 'OPNAME' ? `OPN-${dateStamp}` : `RST-${dateStamp}`,
+    reason: adjustmentType === 'OPNAME' ? 'Stok Opname Cepat' : 'Restok Cepat',
     notes:
       notesText ||
-      (adjustmentType === 'RESTOK' ? 'Penambahan stok masuk' : 'Penyesuaian stok opname'),
+      (adjustmentType === 'OPNAME' ? 'Penyesuaian stok opname' : 'Penambahan stok masuk'),
+    actorUserId: actor?.id ?? null,
+    actorName,
+    movementDate: nowIso,
     createdAt: nowIso,
   };
 
@@ -965,19 +1042,26 @@ export function adjustStock(
 
     db.prepare(`
       INSERT INTO stock_movements (
-        id, product_id, product_name, barcode, type, qty_delta, stock_before, stock_after, reference_id, notes, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, product_id, sku, product_name, barcode, type, qty_delta, stock_before, stock_after,
+        unit_cost, reference_id, reason, notes, actor_user_id, actor_name, movement_date, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       movement.id,
       movement.productId,
+      product.sku,
       movement.productName,
       movement.barcode,
       movement.type,
       movement.qtyDelta,
       movement.stockBefore,
       movement.stockAfter,
+      product.costPrice,
       movement.referenceId,
+      movement.reason ?? '',
       movement.notes,
+      actor?.id ?? null,
+      actorName,
+      nowIso,
       movement.createdAt
     );
 
@@ -986,7 +1070,7 @@ export function adjustStock(
       entityType: 'stock',
       entityId: product.id,
       actorUserId: actor?.id ?? null,
-      actor: actor?.fullName || querySettings().cashierName,
+      actor: actorName,
       summary: `${adjustmentType} "${product.name}": ${stockBefore} → ${stockAfter} ${product.unit}`,
     });
 
@@ -1052,6 +1136,24 @@ export function updateSettings(
     receiptPaperWidth = rawW;
   }
 
+  let maxCashierDiscountPercent = current.maxCashierDiscountPercent ?? 25;
+  if (input.maxCashierDiscountPercent !== undefined) {
+    const val = Number(input.maxCashierDiscountPercent);
+    if (!Number.isFinite(val) || val < 0 || val > 100) {
+      throw new ServiceError(400, 'Batas diskon kasir harus antara 0% hingga 100%.');
+    }
+    maxCashierDiscountPercent = val;
+  }
+
+  let maxAuthorizedDiscountPercent = current.maxAuthorizedDiscountPercent ?? 100;
+  if (input.maxAuthorizedDiscountPercent !== undefined) {
+    const val = Number(input.maxAuthorizedDiscountPercent);
+    if (!Number.isFinite(val) || val < 0 || val > 100) {
+      throw new ServiceError(400, 'Batas maksimal diskon terotorisasi harus antara 0% hingga 100%.');
+    }
+    maxAuthorizedDiscountPercent = val;
+  }
+
   const nextSettings: StoreSettings = {
     storeName,
     storeAddress:
@@ -1082,6 +1184,20 @@ export function updateSettings(
       input.receiptHeaderNote !== undefined
         ? String(input.receiptHeaderNote).trim()
         : (current.receiptHeaderNote ?? ''),
+    allowNegativeStock:
+      input.allowNegativeStock !== undefined
+        ? Boolean(input.allowNegativeStock)
+        : (current.allowNegativeStock ?? false),
+    allowPromoStacking:
+      input.allowPromoStacking !== undefined
+        ? Boolean(input.allowPromoStacking)
+        : (current.allowPromoStacking ?? true),
+    allowManualWithPromo:
+      input.allowManualWithPromo !== undefined
+        ? Boolean(input.allowManualWithPromo)
+        : (current.allowManualWithPromo ?? false),
+    maxCashierDiscountPercent,
+    maxAuthorizedDiscountPercent,
   };
 
   db.exec('BEGIN IMMEDIATE;');
@@ -1090,7 +1206,9 @@ export function updateSettings(
       UPDATE store_settings
       SET store_name = ?, store_address = ?, store_phone = ?, receipt_footer = ?,
           tax_enabled = ?, tax_rate = ?, cashier_name = ?,
-          receipt_paper_width = ?, receipt_show_logo = ?, receipt_show_qr = ?, receipt_header_note = ?
+          receipt_paper_width = ?, receipt_show_logo = ?, receipt_show_qr = ?, receipt_header_note = ?,
+          allow_negative_stock = ?, allow_promo_stacking = ?, allow_manual_with_promo = ?,
+          max_cashier_discount_percent = ?, max_authorized_discount_percent = ?
       WHERE id = 1
     `).run(
       nextSettings.storeName,
@@ -1103,7 +1221,12 @@ export function updateSettings(
       nextSettings.receiptPaperWidth ?? '80mm',
       nextSettings.receiptShowLogo ? 1 : 0,
       nextSettings.receiptShowQr ? 1 : 0,
-      nextSettings.receiptHeaderNote ?? ''
+      nextSettings.receiptHeaderNote ?? '',
+      nextSettings.allowNegativeStock ? 1 : 0,
+      nextSettings.allowPromoStacking ? 1 : 0,
+      nextSettings.allowManualWithPromo ? 1 : 0,
+      nextSettings.maxCashierDiscountPercent ?? 25,
+      nextSettings.maxAuthorizedDiscountPercent ?? 100
     );
 
     recordAuditLog(db, {
@@ -1112,7 +1235,7 @@ export function updateSettings(
       entityId: 'store-settings',
       actorUserId: actor?.id ?? null,
       actor: actor?.fullName || nextSettings.cashierName,
-      summary: `Pembaruan pengaturan toko "${nextSettings.storeName}" (PPN ${nextSettings.taxRate}%, Struk ${nextSettings.receiptPaperWidth})`,
+      summary: `Pembaruan pengaturan toko "${nextSettings.storeName}" (PPN ${nextSettings.taxRate}%, Struk ${nextSettings.receiptPaperWidth}, Stok Negatif ${nextSettings.allowNegativeStock ? 'Diizinkan' : 'Ditolak'}, Stacking Promo ${nextSettings.allowPromoStacking ? 'Ya' : 'Tidak'})`,
     });
     db.exec('COMMIT;');
   } catch (err) {

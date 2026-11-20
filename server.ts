@@ -43,6 +43,7 @@ import {
   createPaymentMethod,
   getTransactionById,
   holdTransaction,
+  listCustomerTransactions,
   listCustomers,
   listHeldTransactions,
   listPaymentMethods,
@@ -50,7 +51,32 @@ import {
   resumeHeldTransaction,
   setPaymentMethodStatus,
 } from './server/services/checkoutService.ts';
+import {
+  adjustCustomerLoyaltyPoints,
+  getCustomerDetail,
+  getLoyaltySettings,
+  setCustomerStatus,
+  updateCustomerProfile,
+  updateLoyaltySettings,
+} from './server/services/customerService.ts';
 import { ServiceError } from './server/services/errors.ts';
+import {
+  approveStockOpname,
+  cancelStockOpname,
+  createStockAdjustment,
+  createStockOpname,
+  finalizeStockOpname,
+  getProductStockCard,
+  getStockBalanceList,
+  getStockOpnameDetail,
+  listStockAdjustments,
+  listStockMovements,
+  listStockOpnames,
+  listStockReceivings,
+  recordStockIn,
+  updateProductMinStock,
+  updateStockOpnameCounts,
+} from './server/services/inventoryService.ts';
 import {
   adjustStock,
   createProduct,
@@ -64,12 +90,29 @@ import {
   updateSettings,
 } from './server/services/posService.ts';
 import {
+  createPromotion,
+  getPromotionById,
+  listPromotions,
+  setPromotionStatus,
+  updatePromotion,
+} from './server/services/promotionService.ts';
+import {
   deleteStoreLogo,
   getReceiptData,
   recordReceiptPrint,
   resolveStoreLogoPath,
   uploadStoreLogo,
 } from './server/services/receiptService.ts';
+import {
+  getRecognitionProviderStatuses,
+  getRecognitionSettings,
+  identifyProductFromImage,
+  listRecognitionLogs,
+  recordRecognitionFeedback,
+  resolveCapturedRecognitionImagePath,
+  syncReferenceImageEmbeddings,
+  updateRecognitionSettings,
+} from './server/services/recognitionService.ts';
 import {
   createRole,
   createUser,
@@ -83,7 +126,12 @@ import {
   updateRolePermissions,
   updateUser,
 } from './server/services/userRoleService.ts';
-import type { PinSensitiveAction, ProductStatus, UserSummary } from './src/types.ts';
+import type {
+  PinSensitiveAction,
+  ProductStatus,
+  PromotionStatus,
+  UserSummary,
+} from './src/types.ts';
 
 const PORT = Number(process.env.PORT || 3000);
 const ACCESS_COOKIE = 'kassa_access_token';
@@ -230,6 +278,13 @@ export function createApp() {
   // Uploaded store logo serving endpoint (safe filename & traversal guarded)
   app.get('/api/uploads/store/:fileName', (req, res) => {
     const filePath = resolveStoreLogoPath(String(req.params.fileName));
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.sendFile(filePath);
+  });
+
+  // Captured AI recognition images serving endpoint (safe filename & traversal guarded)
+  app.get('/api/uploads/recognition/:fileName', (req, res) => {
+    const filePath = resolveCapturedRecognitionImagePath(String(req.params.fileName));
     res.setHeader('Cache-Control', 'public, max-age=86400');
     res.sendFile(filePath);
   });
@@ -707,24 +762,353 @@ export function createApp() {
     res.json(result);
   });
 
-  // --- POS Core & Checkout APIs (Phase 04) ---
+  // --- Phase 06 Inventory & Stock Control APIs ---
+  app.get(
+    '/api/inventory/stock-balance',
+    requireAuth,
+    requireAnyPermission(['stock:view', 'reports:view', 'products:view']),
+    (req, res) => {
+      const q = req.query as Record<string, string | undefined>;
+      const result = getStockBalanceList({
+        search: q.search,
+        stockStatus: q.stockStatus,
+        categoryId: q.categoryId,
+        productStatus: q.productStatus,
+        page: q.page ? Number(q.page) : 1,
+        pageSize: q.pageSize ? Number(q.pageSize) : 50,
+      });
+      res.json(result);
+    }
+  );
+
+  app.patch(
+    '/api/inventory/products/:id/min-stock',
+    requireAuth,
+    requireAnyPermission(['stock:adjust', 'products:edit']),
+    (req: AuthenticatedRequest, res) => {
+      const { minStock } = req.body as { minStock?: unknown };
+      const result = updateProductMinStock(String(req.params.id), minStock, req.authUser!);
+      res.json({ ...result, store: getBootstrapData(req.authUser) });
+    }
+  );
+
+  app.get(
+    '/api/inventory/products/:id/stock-card',
+    requireAuth,
+    requireAnyPermission(['stock:view', 'reports:view', 'products:view']),
+    (req, res) => {
+      const q = req.query as Record<string, string | undefined>;
+      const card = getProductStockCard(String(req.params.id), {
+        type: q.type,
+        dateFrom: q.dateFrom,
+        dateTo: q.dateTo,
+      });
+      res.json(card);
+    }
+  );
+
+  app.get(
+    '/api/inventory/movements',
+    requireAuth,
+    requireAnyPermission(['stock:view', 'reports:view']),
+    (req, res) => {
+      const q = req.query as Record<string, string | undefined>;
+      const movements = listStockMovements({
+        productId: q.productId,
+        type: q.type,
+        search: q.search,
+        dateFrom: q.dateFrom,
+        dateTo: q.dateTo,
+        limit: q.limit ? Number(q.limit) : 400,
+      });
+      res.json({ movements });
+    }
+  );
+
+  app.get(
+    '/api/inventory/stock-in',
+    requireAuth,
+    requireAnyPermission(['stock:view', 'reports:view']),
+    (req, res) => {
+      const q = req.query as Record<string, string | undefined>;
+      const receivings = listStockReceivings({
+        search: q.search,
+        productId: q.productId,
+        dateFrom: q.dateFrom,
+        dateTo: q.dateTo,
+        limit: q.limit ? Number(q.limit) : 200,
+      });
+      res.json({ receivings });
+    }
+  );
+
+  app.post('/api/inventory/stock-in', requireAuth, (req: AuthenticatedRequest, res) => {
+    const result = recordStockIn(req.body, req.authUser!);
+    res.status(201).json({ ...result, store: getBootstrapData(req.authUser) });
+  });
+
+  app.get(
+    '/api/inventory/adjustments',
+    requireAuth,
+    requireAnyPermission(['stock:view', 'reports:view']),
+    (req, res) => {
+      const q = req.query as Record<string, string | undefined>;
+      const adjustments = listStockAdjustments({
+        search: q.search,
+        productId: q.productId,
+        direction: q.direction,
+        limit: q.limit ? Number(q.limit) : 200,
+      });
+      res.json({ adjustments });
+    }
+  );
+
+  app.post('/api/inventory/adjustments', requireAuth, (req: AuthenticatedRequest, res) => {
+    const result = createStockAdjustment(req.body, req.authUser!);
+    res.status(201).json({ ...result, store: getBootstrapData(req.authUser) });
+  });
+
+  app.get(
+    '/api/inventory/opnames',
+    requireAuth,
+    requireAnyPermission(['stock:view', 'reports:view']),
+    (req, res) => {
+      const q = req.query as { status?: string };
+      res.json({ opnames: listStockOpnames(q.status) });
+    }
+  );
+
+  app.get(
+    '/api/inventory/opnames/:id',
+    requireAuth,
+    requireAnyPermission(['stock:view', 'reports:view']),
+    (req, res) => {
+      res.json({ opname: getStockOpnameDetail(String(req.params.id)) });
+    }
+  );
+
+  app.post(
+    '/api/inventory/opnames',
+    requireAuth,
+    requirePermission('stock:adjust'),
+    (req: AuthenticatedRequest, res) => {
+      const opname = createStockOpname(req.body || {}, req.authUser!);
+      res.status(201).json({ opname });
+    }
+  );
+
+  app.put(
+    '/api/inventory/opnames/:id/counts',
+    requireAuth,
+    requirePermission('stock:adjust'),
+    (req: AuthenticatedRequest, res) => {
+      const opname = updateStockOpnameCounts(String(req.params.id), req.body || {}, req.authUser!);
+      res.json({ opname });
+    }
+  );
+
+  app.post('/api/inventory/opnames/:id/approve', requireAuth, (req: AuthenticatedRequest, res) => {
+    const opname = approveStockOpname(String(req.params.id), req.body || {}, req.authUser!);
+    res.json({ opname });
+  });
+
+  app.post(
+    '/api/inventory/opnames/:id/finalize',
+    requireAuth,
+    requirePermission('stock:adjust'),
+    (req: AuthenticatedRequest, res) => {
+      const opname = finalizeStockOpname(String(req.params.id), req.authUser!);
+      res.json({ opname, store: getBootstrapData(req.authUser) });
+    }
+  );
+
+  app.post(
+    '/api/inventory/opnames/:id/cancel',
+    requireAuth,
+    requirePermission('stock:adjust'),
+    (req: AuthenticatedRequest, res) => {
+      const { reason } = (req.body || {}) as { reason?: string };
+      const opname = cancelStockOpname(
+        String(req.params.id),
+        typeof reason === 'string' ? reason : undefined,
+        req.authUser!
+      );
+      res.json({ opname });
+    }
+  );
+
+  // --- Phase 09 Customer & Loyalty APIs ---
   app.get(
     '/api/customers',
     requireAuth,
-    requireAnyPermission(['pos:view', 'transactions:view']),
+    requireAnyPermission(['customers:view', 'pos:view', 'transactions:view']),
     (req, res) => {
-      const q = req.query as { search?: string };
-      res.json({ customers: listCustomers(q.search) });
+      const q = req.query as { search?: string; status?: string };
+      res.json({ customers: listCustomers(q.search, q.status) });
+    }
+  );
+
+  app.get(
+    '/api/customers/:id',
+    requireAuth,
+    requireAnyPermission(['customers:view', 'pos:view', 'transactions:view']),
+    (req, res) => {
+      const detail = getCustomerDetail(String(req.params.id), (custId) =>
+        listCustomerTransactions(custId, 100)
+      );
+      res.json(detail);
     }
   );
 
   app.post(
     '/api/customers',
     requireAuth,
-    requireAnyPermission(['pos:create', 'pos:view']),
+    requireAnyPermission(['customers:create', 'pos:create', 'pos:view']),
     (req: AuthenticatedRequest, res) => {
       const customer = createCustomer(req.body, req.authUser!);
       res.status(201).json({ customer, store: getBootstrapData(req.authUser) });
+    }
+  );
+
+  app.put(
+    '/api/customers/:id',
+    requireAuth,
+    requirePermission('customers:edit'),
+    (req: AuthenticatedRequest, res) => {
+      const customer = updateCustomerProfile(String(req.params.id), req.body, req.authUser!);
+      res.json({ customer, store: getBootstrapData(req.authUser) });
+    }
+  );
+
+  app.patch(
+    '/api/customers/:id/status',
+    requireAuth,
+    requirePermission('customers:edit'),
+    (req: AuthenticatedRequest, res) => {
+      const { isActive } = req.body as { isActive?: unknown };
+      if (typeof isActive !== 'boolean') {
+        throw new ServiceError(400, 'Field isActive harus berupa boolean.');
+      }
+      const customer = setCustomerStatus(String(req.params.id), isActive, req.authUser!);
+      res.json({ customer, store: getBootstrapData(req.authUser) });
+    }
+  );
+
+  app.post(
+    '/api/customers/:id/loyalty/adjust',
+    requireAuth,
+    requirePermission('customers:edit'),
+    (req: AuthenticatedRequest, res) => {
+      const result = adjustCustomerLoyaltyPoints(String(req.params.id), req.body, req.authUser!);
+      res.json({ ...result, store: getBootstrapData(req.authUser) });
+    }
+  );
+
+  app.get(
+    '/api/loyalty/settings',
+    requireAuth,
+    requireAnyPermission([
+      'pos:view',
+      'customers:view',
+      'promotions:view',
+      'promotions:manage',
+      'settings:edit',
+    ]),
+    (_req, res) => {
+      res.json({ loyaltySettings: getLoyaltySettings() });
+    }
+  );
+
+  app.put(
+    '/api/loyalty/settings',
+    requireAuth,
+    requireAnyPermission(['promotions:manage', 'settings:edit']),
+    (req: AuthenticatedRequest, res) => {
+      const loyaltySettings = updateLoyaltySettings(req.body, req.authUser!);
+      res.json({ loyaltySettings, store: getBootstrapData(req.authUser) });
+    }
+  );
+
+  // --- Phase 09 Promotion APIs ---
+  app.get(
+    '/api/promotions',
+    requireAuth,
+    requireAnyPermission(['promotions:view', 'promotions:manage', 'pos:view']),
+    (req, res) => {
+      const q = req.query as {
+        search?: string;
+        status?: string;
+        scope?: string;
+        activeOnly?: string;
+      };
+      const promotions = listPromotions({
+        search: q.search,
+        status: q.status,
+        scope: q.scope,
+        activeOnly: q.activeOnly === 'true' || q.activeOnly === '1',
+      });
+      res.json({ promotions });
+    }
+  );
+
+  app.post(
+    '/api/promotions/evaluate',
+    requireAuth,
+    requireAnyPermission(['pos:view', 'pos:create']),
+    (req, res) => {
+      const settings = querySettings();
+      const calc = calculateCartAuthoritative(req.body, settings, {
+        checkStock: false,
+        strictPromotions: false,
+      });
+      res.json({
+        preview: calc.preview,
+        eligiblePromotions: calc.preview.eligiblePromotions,
+      });
+    }
+  );
+
+  app.get(
+    '/api/promotions/:id',
+    requireAuth,
+    requireAnyPermission(['promotions:view', 'promotions:manage', 'pos:view']),
+    (req, res) => {
+      res.json({ promotion: getPromotionById(String(req.params.id)) });
+    }
+  );
+
+  app.post(
+    '/api/promotions',
+    requireAuth,
+    requirePermission('promotions:manage'),
+    (req: AuthenticatedRequest, res) => {
+      const promotion = createPromotion(req.body, req.authUser!);
+      res.status(201).json({ promotion, store: getBootstrapData(req.authUser) });
+    }
+  );
+
+  app.put(
+    '/api/promotions/:id',
+    requireAuth,
+    requirePermission('promotions:manage'),
+    (req: AuthenticatedRequest, res) => {
+      const promotion = updatePromotion(String(req.params.id), req.body, req.authUser!);
+      res.json({ promotion, store: getBootstrapData(req.authUser) });
+    }
+  );
+
+  app.patch(
+    '/api/promotions/:id/status',
+    requireAuth,
+    requirePermission('promotions:manage'),
+    (req: AuthenticatedRequest, res) => {
+      const { status } = req.body as { status?: PromotionStatus };
+      const promotion = setPromotionStatus(
+        String(req.params.id),
+        status as PromotionStatus,
+        req.authUser!
+      );
+      res.json({ promotion, store: getBootstrapData(req.authUser) });
     }
   );
 
@@ -1068,6 +1452,104 @@ export function createApp() {
     revokeSessionById(String(req.params.id), req.authUser!);
     res.json({ ok: true });
   });
+
+  // --- Phase 08 AI Product Recognition APIs ---
+  app.get(
+    '/api/recognition/providers',
+    requireAuth,
+    requireAnyPermission(['recognition:use', 'recognition:manage', 'pos:view', 'products:view']),
+    (_req, res) => {
+      res.json(getRecognitionProviderStatuses());
+    }
+  );
+
+  app.get(
+    '/api/recognition/settings',
+    requireAuth,
+    requireAnyPermission(['recognition:use', 'recognition:manage', 'pos:view', 'settings:edit']),
+    (_req, res) => {
+      res.json({ settings: getRecognitionSettings() });
+    }
+  );
+
+  app.put(
+    '/api/recognition/settings',
+    requireAuth,
+    requireAnyPermission(['recognition:manage', 'settings:edit']),
+    (req: AuthenticatedRequest, res) => {
+      const settings = updateRecognitionSettings(req.body, req.authUser!);
+      res.json({ settings, providers: getRecognitionProviderStatuses().providers });
+    }
+  );
+
+  app.post(
+    '/api/recognition/identify',
+    requireAuth,
+    requireAnyPermission(['recognition:use', 'pos:view', 'products:view', 'stock:view']),
+    async (req: AuthenticatedRequest, res, next) => {
+      try {
+        const result = await identifyProductFromImage(req.body, req.authUser!);
+        res.json({ result });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  app.post(
+    '/api/recognition/references/sync',
+    requireAuth,
+    requireAnyPermission(['recognition:manage', 'products:edit', 'catalog:manage']),
+    async (req: AuthenticatedRequest, res, next) => {
+      try {
+        const body = (req.body || {}) as {
+          productId?: string;
+          providerId?: string;
+          force?: boolean;
+          limit?: number;
+        };
+        const summary = await syncReferenceImageEmbeddings(
+          {
+            productId: body.productId,
+            providerId: body.providerId,
+            force: Boolean(body.force),
+            limit: body.limit,
+          },
+          req.authUser!
+        );
+        res.json({ summary, store: getBootstrapData(req.authUser) });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  app.post(
+    '/api/recognition/logs/:id/feedback',
+    requireAuth,
+    requireAnyPermission(['recognition:use', 'pos:view', 'products:view', 'stock:view']),
+    (req: AuthenticatedRequest, res) => {
+      const log = recordRecognitionFeedback(String(req.params.id), req.body, req.authUser!);
+      res.json({
+        log,
+        store: req.body?.promoteAsReferenceImage ? getBootstrapData(req.authUser) : undefined,
+      });
+    }
+  );
+
+  app.get(
+    '/api/recognition/logs',
+    requireAuth,
+    requireAnyPermission(['recognition:use', 'recognition:manage', 'audit:view', 'pos:view']),
+    (req, res) => {
+      const q = req.query as { outcome?: string; limit?: string };
+      const logs = listRecognitionLogs({
+        outcome: q.outcome,
+        limit: q.limit ? Number(q.limit) : 50,
+      });
+      res.json({ logs });
+    }
+  );
 
   // Centralized API error handler
   app.use('/api', (err: unknown, _req: Request, res: Response, _next: NextFunction) => {

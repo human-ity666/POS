@@ -6,17 +6,19 @@ Aplikasi Point of Sale (POS) toko ritel berbasis web dengan pemindai barcode kam
 
 - **Frontend**: React 19 + TypeScript (`strict: true`) + Tailwind CSS v4 + Vite
 - **Pemindai & Barcode**:
-  - `@zxing/browser` & `@zxing/library` untuk pemindaian kamera langsung (`EAN-13`, `EAN-8`, `UPC-A`, `UPC-E`, `Code 128`, `Code 39`, `QR Code`)
+  - Mesin pemindai kamera hibrida (`src/utils/barcodeScanner.ts`): memprioritaskan native browser `BarcodeDetector` (hardware-accelerated) dengan fallback otomatis ke `@zxing/browser` & `@zxing/library`, mendukung `EAN-13`, `EAN-8`, `UPC-A`, `UPC-E`, `Code 128`, `Code 39`, serta mode `QR Code` opsional, kontrol torch/kamera belakang mobile, validasi GS1 check digit, dan proteksi duplikat/debounce
   - `jsbarcode` untuk render dan cetak label barcode SVG scannable (mendukung multi-barcode per produk)
-  - Web Audio API untuk suara *beep* konfirmasi pemindaian
-- **Backend**: Express + TypeScript (`server.ts`, `server/services/authService.ts`, `server/services/userRoleService.ts`, `server/services/catalogService.ts`, `server/services/checkoutService.ts`, `server/services/receiptService.ts`, `server/services/posService.ts`, `server/services/auditService.ts`)
-- **Kalkulasi Moneter Zero-Float**: `server/utils/money.ts` menggunakan `BigInt` scaled-integer & basis-point untuk perhitungan harga, diskon baris, diskon transaksi, alokasi diskon proporsional, dan pajak tanpa error floating-point.
-- **Database & Migrasi**: SQLite relasional bawaan Node.js (`node:sqlite` `DatabaseSync`) di `data/pos.db` (dapat dikonfigurasi via `POS_DB_FILE`) dengan migrasi SQL formal di `server/db/migrations/` (`001_initial_pos.sql`, `002_auth_rbac.sql`, `003_product_catalog.sql`, `004_pos_core_checkout.sql`, `005_receipt_printing.sql`).
+  - Web Audio API untuk suara *beep* konfirmasi pemindaian + haptic feedback mobile
+- **Backend**: Express + TypeScript (`server.ts`, `server/services/authService.ts`, `server/services/userRoleService.ts`, `server/services/catalogService.ts`, `server/services/customerService.ts`, `server/services/promotionService.ts`, `server/services/checkoutService.ts`, `server/services/inventoryService.ts`, `server/services/receiptService.ts`, `server/services/recognitionService.ts`, `server/services/ai/*`, `server/services/posService.ts`, `server/services/auditService.ts`)
+- **Pelanggan, Loyalitas & Promosi (`Phase 09`)**: Manajemen profil & histori belanja member (`CUST-XXXX` / `MBR-XXXX`), transaksi tamu opsional, fondasi poin loyalitas (`EARN`/`REDEEM`/`ADJUST` dengan aturan konfigurabel), serta mesin promosi `BigInt` (`PERCENT`, `FIXED_AMOUNT`, `SPECIAL_PRICE`, `BUY_X_GET_Y`, `BUNDLE`) dengan validasi periode & aturan stacking/batas diskon.
+- **Pengenalan Produk AI (`Phase 08`)**: Arsitektur provider modular yang dapat diganti (`gemini-vision` server-side `@google/genai`, `local-inference`, `remote-inference`), pra-pemrosesan gambar di klien (`src/utils/imagePreprocess.ts`), ranking multi-sinyal (embedding visual + OCR + merek + varian + berat/volume + kemasan), ambang batas keyakinan terkonfigurasi, serta umpan balik terverifikasi.
+- **Kalkulasi Moneter Zero-Float**: `server/utils/money.ts` menggunakan `BigInt` scaled-integer & basis-point untuk perhitungan harga, diskon baris, diskon promosi, penukaran poin, alokasi proporsional, dan pajak tanpa error floating-point.
+- **Database & Migrasi**: SQLite relasional bawaan Node.js (`node:sqlite` `DatabaseSync`) di `data/pos.db` (dapat dikonfigurasi via `POS_DB_FILE`) dengan migrasi SQL formal di `server/db/migrations/` (`001_initial_pos.sql` s.d. `008_customer_promotion.sql`).
 - **Struk, QR Digital & Pencetakan (`Phase 05`)**:
   - Snapshot historis struk (`receipt_snapshots`) dibekukan pada saat checkout sehingga cetak ulang selalu konsisten dan tidak pernah dihitung ulang dari harga katalog terbaru.
   - Tata letak cetak thermal `58mm`, `80mm`, standar `A4`, serta struk digital responsif dengan QR Code (`qrcode`) yang terhubung ke halaman verifikasi digital publik.
   - Arsitektur adapter printer modular (`src/services/printerService.ts`) menggunakan dialog cetak browser/OS + ekspor HTML mandiri dengan pelacakan salinan cetak (`receipt_print_logs`).
-- **Penyimpanan Gambar & Logo**: Gambar produk di `data/uploads/products/` (`POS_UPLOADS_DIR`) dan logo toko di `data/uploads/store/` (`POS_STORE_UPLOADS_DIR`) dengan validasi MIME & magic bytes (`JPG`, `PNG`, `WEBP`).
+- **Penyimpanan Gambar & Logo**: Gambar produk di `data/uploads/products/` (`POS_UPLOADS_DIR`), logo toko di `data/uploads/store/` (`POS_STORE_UPLOADS_DIR`), dan tangkapan AI di `data/uploads/recognition/` (`POS_RECOGNITION_UPLOADS_DIR`) dengan validasi MIME & magic bytes (`JPG`, `PNG`, `WEBP`).
 - **Keamanan**:
   - Hashing kata sandi & PIN dengan `crypto.scryptSync` + salt acak 16-byte + perbandingan `timingSafeEqual`
   - Sesi token ter-hash (`SHA-256`) di database dengan cookie `HttpOnly` dan rotasi refresh token
@@ -45,15 +47,23 @@ Aplikasi Point of Sale (POS) toko ritel berbasis web dengan pemindai barcode kam
 │   │       ├── 002_auth_rbac.sql              # Users, roles, permissions, sessions, pin_authorizations
 │   │       ├── 003_product_catalog.sql        # Categories, brands, uoms, product_barcodes, product_images
 │   │       ├── 004_pos_core_checkout.sql      # Customers, payment_methods, document_sequences, transaction_payments
-│   │       └── 005_receipt_printing.sql       # Store logo/receipt settings, receipt_snapshots, receipt_print_logs
+│   │       ├── 005_receipt_printing.sql       # Store logo/receipt settings, receipt_snapshots, receipt_print_logs
+│   │       ├── 006_inventory_stock_control.sql# Stock receivings, adjustments, opnames, negative stock, movement audit
+│   │       ├── 007_ai_product_recognition.sql # Image embeddings, recognition settings, & verification feedback logs
+│   │       └── 008_customer_promotion.sql     # Membership loyalty, point ledger, promotions, targets & stacking rules
 │   ├── services/
+│   │   ├── ai/                                # Pluggable AI providers (Gemini, Local, Remote) & multi-signal scorer
 │   │   ├── auditService.ts                    # Pencatatan & query audit log
 │   │   ├── authService.ts                     # Login, refresh rotation, logout, sesi, & verifikasi PIN
 │   │   ├── catalogService.ts                  # Master katalog, multi-barcode, gambar, kategori/merek/UOM, CSV
-│   │   ├── checkoutService.ts                 # Kalkulasi BigInt, hold/resume/cancel, & checkout atomik 14 langkah
+│   │   ├── checkoutService.ts                 # Kalkulasi BigInt, promo/poin, hold/resume/cancel, & checkout atomik
+│   │   ├── customerService.ts                 # Manajemen pelanggan, metrik belanja, aturan & mutasi poin loyalitas
 │   │   ├── errors.ts                          # ServiceError terstruktur
+│   │   ├── inventoryService.ts                # Saldo stok, barang masuk, penyesuaian, stok opname & kartu stok
 │   │   ├── posService.ts                      # Wrapper POS & laporan stok server-authoritative
+│   │   ├── promotionService.ts                # Manajemen promosi, validasi aturan, & evaluator BigInt
 │   │   ├── receiptService.ts                  # Snapshot struk historis, log cetak ulang, QR token, & logo toko
+│   │   ├── recognitionService.ts              # Pipeline 13 langkah identifikasi produk AI & sinkronisasi referensi
 │   │   └── userRoleService.ts                 # Manajemen pengguna, role, & matriks izin
 │   └── utils/
 │       ├── crypto.ts                          # Hashing scrypt & SHA-256 token
@@ -65,14 +75,18 @@ Aplikasi Point of Sale (POS) toko ritel berbasis web dengan pemindai barcode kam
 │   │   └── printerService.ts                  # Adapter cetak modular (dialog OS/browser & ekspor struk digital HTML)
 │   ├── utils/
 │   │   ├── api.ts                             # Client fetch terautentikasi + auto-refresh token
-│   │   └── format.ts                          # Format Rupiah, tanggal, EAN-13, parser CSV RFC-4180, file helpers
+│   │   ├── barcodeScanner.ts                  # Engine pemindai kamera (native BarcodeDetector + ZXing), validator GS1, & guard debounce
+│   │   ├── format.ts                          # Format Rupiah, tanggal, EAN-13, parser CSV RFC-4180, file helpers
+│   │   └── imagePreprocess.ts                 # Resizing & kompresi kanvas klien untuk AI recognition
 │   └── components/
 │       ├── AccessDeniedView.tsx               # Layar penolakan akses RBAC
+│       ├── AiRecognitionModal.tsx             # Modal kamera/unggah AI, hasil OCR, kandidat, threshold & umpan balik
 │       ├── BarcodeSvg.tsx                     # Renderer barcode SVG scannable
 │       ├── CameraPhotoCaptureModal.tsx        # Tangkap foto produk & referensi AI via kamera
 │       ├── CameraScanner.tsx                  # Pemindai barcode kamera langsung
-│       ├── CashierView.tsx                    # Terminal kasir (autocomplete, hold/resume, diskon/override)
+│       ├── CashierView.tsx                    # Terminal kasir (promo, poin loyalitas, autocomplete, hold/resume, AI)
 │       ├── CatalogTaxonomyTabs.tsx            # Manajemen Kategori hierarkis, Merek, & Satuan UOM
+│       ├── CustomersView.tsx                  # Manajemen pelanggan, profil member, riwayat belanja & mutasi poin
 │       ├── HeldTransactionsModal.tsx          # Daftar, lanjutkan, & batalkan transaksi ditahan (Hold)
 │       ├── InventoryView.tsx                  # Katalog produk (filter, sort, pagination, ekspor/impor CSV)
 │       ├── LoginScreen.tsx                    # Halaman login dengan show/hide password
@@ -82,19 +96,22 @@ Aplikasi Point of Sale (POS) toko ritel berbasis web dengan pemindai barcode kam
 │       ├── ProductImportModal.tsx             # Wizard impor CSV (mapping kolom, validasi, preview, ringkasan)
 │       ├── ProductModals.tsx                  # Form produk 7 bagian, penyesuaian stok, & cetak label barcode
 │       ├── ProfileModal.tsx                   # Profil pengguna & ubah kata sandi
+│       ├── PromotionsView.tsx                 # Manajemen promosi, paket bundle, aturan loyalitas & kebijakan diskon
 │       ├── ReceiptDetailView.tsx              # Halaman detail struk, cetak ulang, riwayat cetak, & struk digital
 │       ├── ReceiptDocument.tsx                # Renderer struk multi-format (58mm, 80mm, A4, Digital)
 │       ├── ReceiptModal.tsx                   # Modal pratinjau cepat & cetak struk pasca-checkout
 │       ├── ReceiptQrCode.tsx                  # Renderer QR code verifikasi struk digital
 │       ├── RolesPermissionsView.tsx           # Manajemen role & matriks izin modul
 │       ├── SecurityAuditView.tsx              # Manajemen sesi aktif & viewer audit log
-│       ├── SettingsModal.tsx                  # Pengaturan toko, PPN, logo/kertas struk, & metode pembayaran
+│       ├── SettingsModal.tsx                  # Pengaturan toko, PPN, stok negatif, logo/kertas struk & metode bayar
+│       ├── StockCardModal.tsx                 # Modal kartu stok per produk, filter tanggal/jenis & ekspor CSV
+│       ├── StockControlView.tsx               # Kontrol stok (saldo/alert, barang masuk, penyesuaian, opname, mutasi)
 │       ├── StockReportView.tsx                # Laporan stok otomatis & valuasi kategori dinamis
-│       ├── TransactionDetailModal.tsx         # Detail lengkap transaksi (item, diskon, split payment)
+│       ├── TransactionDetailModal.tsx         # Detail lengkap transaksi (item, promo, poin, split payment)
 │       ├── TransactionsView.tsx               # Riwayat transaksi dengan filter tanggal, status & metode
 │       └── UsersView.tsx                      # Manajemen pengguna
 └── tests/
-    └── pos.test.ts                            # Pengujian integrasi Phase 01–05
+    └── pos.test.ts                            # Pengujian unit & integrasi Phase 01–09
 ```
 
 ## Dokumentasi Terkait
@@ -107,6 +124,6 @@ Aplikasi Point of Sale (POS) toko ritel berbasis web dengan pemindai barcode kam
 
 - Jalankan server pengembangan (port 3000): `npm run dev`
 - Periksa TypeScript strict mode: `npm run lint`
-- Jalankan pengujian integrasi Phase 01–05: `npm test`
+- Jalankan pengujian unit & integrasi Phase 01–09: `npm test`
 - Build produksi: `npm run build`
 - Jalankan mode produksi: `NODE_ENV=production npm start`

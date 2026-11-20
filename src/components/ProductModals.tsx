@@ -23,9 +23,18 @@ import {
   type UnitOfMeasure,
 } from '../types';
 import { apiFetch } from '../utils/api';
-import { formatFileSize, formatRupiah, generateValidEAN13, readFileAsDataUrl } from '../utils/format';
+import {
+  formatFileSize,
+  formatRupiah,
+  generateValidEAN13,
+  playScannerSound,
+  readFileAsDataUrl,
+} from '../utils/format';
+import type { ScanResultFeedback } from '../utils/barcodeScanner';
+import type { RecognitionNewProductPrefill } from './AiRecognitionModal';
 import { BarcodeSvg } from './BarcodeSvg';
 import { CameraPhotoCaptureModal } from './CameraPhotoCaptureModal';
+import { CameraScanner, type CameraScanEventMeta } from './CameraScanner';
 
 interface DraftBarcode {
   key: string;
@@ -74,6 +83,7 @@ interface ProductFormModalProps {
   open: boolean;
   editingProduct: Product | null;
   initialBarcode?: string;
+  initialRecognitionPrefill?: RecognitionNewProductPrefill | null;
   categories: Category[];
   brands: Brand[];
   uoms: UnitOfMeasure[];
@@ -96,6 +106,7 @@ export function ProductFormModal({
   open,
   editingProduct,
   initialBarcode,
+  initialRecognitionPrefill,
   categories,
   brands,
   uoms,
@@ -134,6 +145,9 @@ export function ProductFormModal({
   const [queuedImages, setQueuedImages] = useState<QueuedImage[]>([]);
   const [liveProduct, setLiveProduct] = useState<Product | null>(null);
   const [cameraOpen, setCameraOpen] = useState(false);
+  const [barcodeScannerOpen, setBarcodeScannerOpen] = useState(false);
+  const [barcodeSoundEnabled, setBarcodeSoundEnabled] = useState(true);
+  const [barcodeScanStatus, setBarcodeScanStatus] = useState<ScanResultFeedback | null>(null);
   const [imageBusy, setImageBusy] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
@@ -163,11 +177,16 @@ export function ProductFormModal({
   );
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setBarcodeScannerOpen(false);
+      return;
+    }
     setError(null);
     setQueuedImages([]);
     setNewBarcodeVal('');
     setNewBarcodeType('EAN-13');
+    setBarcodeScannerOpen(false);
+    setBarcodeScanStatus(null);
 
     if (editingProduct) {
       setLiveProduct(editingProduct);
@@ -212,36 +231,76 @@ export function ProductFormModal({
       setLiveProduct(null);
       const nextNum = existingProducts.length + 1;
       setSku(`SKU-${String(nextNum).padStart(4, '0')}`);
-      setName('');
-      setDescription('');
+
+      const ocr = initialRecognitionPrefill?.ocrSignals;
+      setName(ocr?.productName || '');
+      setDescription(ocr?.rawText ? `OCR AI: ${ocr.rawText.slice(0, 180)}` : '');
       setStatus('ACTIVE');
+      const preBarcode = ocr?.productCode || initialBarcode;
       setBarcodes([
         {
           key: 'new-bc-0',
-          barcode: initialBarcode || generateValidEAN13(),
-          barcodeType: initialBarcode && !/^\d{13}$/.test(initialBarcode) ? 'CODE-128' : 'EAN-13',
+          barcode: preBarcode || generateValidEAN13(),
+          barcodeType: preBarcode && !/^\d{13}$/.test(preBarcode) ? 'CODE-128' : 'EAN-13',
           isPrimary: true,
         },
       ]);
       const defaultCat = categories.find((c) => !c.parentId && c.isActive);
-      const defaultBrand = brands.find((b) => b.name.toLowerCase() === 'umum') || brands[0];
+      const matchedBrand = ocr?.brand
+        ? brands.find(
+            (b) =>
+              b.isActive &&
+              (b.name.toLowerCase().includes(ocr.brand.toLowerCase()) ||
+                ocr.brand.toLowerCase().includes(b.name.toLowerCase()))
+          )
+        : undefined;
+      const defaultBrand =
+        matchedBrand || brands.find((b) => b.name.toLowerCase() === 'umum') || brands[0];
       const defaultUom = uoms.find((u) => u.code === 'PCS') || uoms[0];
       setCategoryId(defaultCat?.id || '');
       setSubcategoryId('');
       setBrandId(defaultBrand?.id || '');
-      setVariant('');
-      setSize('');
+      setVariant([ocr?.variant, ocr?.flavor].filter(Boolean).join(' ').trim());
+      setSize(ocr?.size || ocr?.weight || ocr?.volume || '');
       setUomId(defaultUom?.id || '');
-      setWeight('');
-      setVolume('');
+
+      const weightNum = ocr?.weight?.match(/(\d+(?:\.\d+)?)/)?.[1];
+      const volumeNum = ocr?.volume?.match(/(\d+(?:\.\d+)?)/)?.[1];
+      setWeight(weightNum || '');
+      setVolume(volumeNum || '');
       setCostPrice('');
       setSellPrice('');
       setSpecialPrice('');
       setTaxCategory('STANDARD');
       setStock('10');
       setMinStock('5');
+
+      if (initialRecognitionPrefill?.capturedImageDataUrl) {
+        const dataUrl = initialRecognitionPrefill.capturedImageDataUrl;
+        setQueuedImages([
+          {
+            key: `ai-prefill-${Date.now()}`,
+            fileName: `ai-capture-${Date.now()}.jpg`,
+            mimeType: 'image/jpeg',
+            dataBase64: dataUrl,
+            fileSize: Math.floor((dataUrl.length * 3) / 4),
+            isPrimary: true,
+            isAiReference: true,
+            referenceAngle: 'front',
+          },
+        ]);
+      }
     }
-  }, [open, editingProduct, initialBarcode, categories, brands, uoms, existingProducts.length]);
+  }, [
+    open,
+    editingProduct,
+    initialBarcode,
+    initialRecognitionPrefill,
+    categories,
+    brands,
+    uoms,
+    existingProducts.length,
+  ]);
 
   if (!open) return null;
 
@@ -598,18 +657,70 @@ export function ProductFormModal({
 
             {/* 2. Identification & Barcode */}
             <section className="space-y-3">
-              <div className="flex items-center justify-between pb-2 border-b border-slate-200">
+              <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-200">
                 <h4 className="text-xs font-semibold text-slate-900">
                   2. Identifikasi & Multi-Barcode ({barcodes.length})
                 </h4>
-                <button
-                  type="button"
-                  onClick={() => setNewBarcodeVal(generateValidEAN13())}
-                  className="text-[11px] font-semibold text-teal-700 hover:text-teal-800"
-                >
-                  Isi Barcode EAN-13 Acak
-                </button>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setBarcodeScannerOpen((v) => !v)}
+                    className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-md border transition-colors ${
+                      barcodeScannerOpen
+                        ? 'bg-slate-900 text-white border-slate-900'
+                        : 'bg-teal-50 text-teal-800 border-teal-200 hover:bg-teal-100'
+                    }`}
+                  >
+                    <Camera className="w-3.5 h-3.5" />
+                    {barcodeScannerOpen ? 'Tutup Pemindai' : 'Scan Barcode Kamera'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setNewBarcodeVal(generateValidEAN13())}
+                    className="text-[11px] font-semibold text-teal-700 hover:text-teal-800"
+                  >
+                    Isi Barcode EAN-13 Acak
+                  </button>
+                </div>
               </div>
+
+              {barcodeScannerOpen && (
+                <CameraScanner
+                  active={barcodeScannerOpen}
+                  onToggle={() => setBarcodeScannerOpen(false)}
+                  onScanBarcode={(code: string, meta?: CameraScanEventMeta) => {
+                    const detectedFmt =
+                      meta?.format && meta.format !== 'UNKNOWN' ? meta.format : 'EAN-13';
+                    if (barcodes.length === 1 && !barcodes[0].barcode.trim()) {
+                      setBarcodes([
+                        {
+                          ...barcodes[0],
+                          barcode: code,
+                          barcodeType: detectedFmt,
+                        },
+                      ]);
+                    } else {
+                      setNewBarcodeVal(code);
+                      setNewBarcodeType(detectedFmt);
+                    }
+                    if (barcodeSoundEnabled) playScannerSound('success');
+                    setBarcodeScanStatus({
+                      barcode: code,
+                      format: meta?.format,
+                      engine: meta?.engine === 'manual' ? undefined : meta?.engine,
+                      found: true,
+                      message: 'Barcode diisikan ke kolom input produk.',
+                      timestamp: Date.now(),
+                    });
+                  }}
+                  soundEnabled={barcodeSoundEnabled}
+                  onToggleSound={() => setBarcodeSoundEnabled((s) => !s)}
+                  lastScanStatus={barcodeScanStatus}
+                  context="barcode-field"
+                  allowQrDefault={false}
+                  title="Scan Barcode Kemasan Produk"
+                />
+              )}
 
               <div className="space-y-2">
                 {barcodes.map((b, idx) => (
@@ -1110,6 +1221,20 @@ export function ProductFormModal({
                               ))}
                             </select>
                           </div>
+                          {img.isAiReference && (
+                            <div className="text-[10px] font-mono text-slate-500 flex items-center justify-between">
+                              <span>Embedding AI:</span>
+                              <span
+                                className={
+                                  img.aiEmbeddingStatus === 'READY'
+                                    ? 'text-emerald-700 font-semibold'
+                                    : 'text-amber-700 font-semibold'
+                                }
+                              >
+                                {img.aiEmbeddingStatus}
+                              </span>
+                            </div>
+                          )}
                         </div>
                       </div>
                     ))
