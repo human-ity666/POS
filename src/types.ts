@@ -223,6 +223,7 @@ export interface LoyaltySettings {
   pointValueRp: number;
   minRedeemPoints: number;
   maxRedeemPercent: number;
+  disableEarnOnRedeem: boolean;
   updatedAt: string;
 }
 

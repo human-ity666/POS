@@ -939,8 +939,13 @@ export function calculateCartAuthoritative(
   const totalDiscountBig =
     lineDiscountTotalBig + txDiscCalc.amount + totalPromotionDiscountBig + loyaltyDiscountBig;
 
+  const suppressEarnOnRedeem =
+    Boolean(loyaltySettings.disableEarnOnRedeem) && loyaltyPointsRedeemed > 0;
   const estimatedPointsEarned =
-    loyaltySettings.enabled && customerRecord && loyaltySettings.pointsPerAmount > 0
+    loyaltySettings.enabled &&
+    customerRecord &&
+    loyaltySettings.pointsPerAmount > 0 &&
+    !suppressEarnOnRedeem
       ? Math.floor(Number(taxableAmountBig) / loyaltySettings.pointsPerAmount)
       : 0;
 

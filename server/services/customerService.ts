@@ -428,7 +428,7 @@ export function getLoyaltySettings(): LoyaltySettings {
   const db = getDb();
   const row = db
     .prepare(`
-      SELECT enabled, points_per_amount, point_value_rp, min_redeem_points, max_redeem_percent, updated_at
+      SELECT enabled, points_per_amount, point_value_rp, min_redeem_points, max_redeem_percent, disable_earn_on_redeem, updated_at
       FROM loyalty_settings
       WHERE id = 1
     `)
@@ -439,6 +439,7 @@ export function getLoyaltySettings(): LoyaltySettings {
         point_value_rp: number;
         min_redeem_points: number;
         max_redeem_percent: number;
+        disable_earn_on_redeem?: number;
         updated_at: string;
       }
     | undefined;
@@ -450,6 +451,7 @@ export function getLoyaltySettings(): LoyaltySettings {
       pointValueRp: 100,
       minRedeemPoints: 10,
       maxRedeemPercent: 50,
+      disableEarnOnRedeem: false,
       updatedAt: new Date().toISOString(),
     };
   }
@@ -460,6 +462,7 @@ export function getLoyaltySettings(): LoyaltySettings {
     pointValueRp: row.point_value_rp,
     minRedeemPoints: row.min_redeem_points,
     maxRedeemPercent: row.max_redeem_percent,
+    disableEarnOnRedeem: Number(row.disable_earn_on_redeem ?? 0) === 1,
     updatedAt: row.updated_at,
   };
 }
@@ -471,6 +474,10 @@ export function updateLoyaltySettings(
   const current = getLoyaltySettings();
 
   const enabled = input.enabled !== undefined ? Boolean(input.enabled) : current.enabled;
+  const disableEarnOnRedeem =
+    input.disableEarnOnRedeem !== undefined
+      ? Boolean(input.disableEarnOnRedeem)
+      : current.disableEarnOnRedeem;
   const pointsPerAmount =
     input.pointsPerAmount !== undefined
       ? Math.round(Number(input.pointsPerAmount))
@@ -508,14 +515,15 @@ export function updateLoyaltySettings(
   try {
     db.prepare(`
       INSERT INTO loyalty_settings (
-        id, enabled, points_per_amount, point_value_rp, min_redeem_points, max_redeem_percent, updated_at
-      ) VALUES (1, ?, ?, ?, ?, ?, ?)
+        id, enabled, points_per_amount, point_value_rp, min_redeem_points, max_redeem_percent, disable_earn_on_redeem, updated_at
+      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         enabled = excluded.enabled,
         points_per_amount = excluded.points_per_amount,
         point_value_rp = excluded.point_value_rp,
         min_redeem_points = excluded.min_redeem_points,
         max_redeem_percent = excluded.max_redeem_percent,
+        disable_earn_on_redeem = excluded.disable_earn_on_redeem,
         updated_at = excluded.updated_at
     `).run(
       enabled ? 1 : 0,
@@ -523,6 +531,7 @@ export function updateLoyaltySettings(
       pointValueRp,
       minRedeemPoints,
       maxRedeemPercent,
+      disableEarnOnRedeem ? 1 : 0,
       nowIso
     );
 
@@ -532,7 +541,7 @@ export function updateLoyaltySettings(
       entityId: 'loyalty-settings',
       actorUserId: actor.id,
       actor: actor.fullName,
-      summary: `Perbarui aturan poin loyalitas (${enabled ? 'Aktif' : 'Nonaktif'}, 1 poin / Rp ${pointsPerAmount.toLocaleString('id-ID')}, nilai Rp ${pointValueRp})`,
+      summary: `Perbarui aturan poin loyalitas (${enabled ? 'Aktif' : 'Nonaktif'}, 1 poin / Rp ${pointsPerAmount.toLocaleString('id-ID')}, nilai Rp ${pointValueRp}, blokir poin saat redeem: ${disableEarnOnRedeem ? 'ON' : 'OFF'})`,
     });
     db.exec('COMMIT;');
   } catch (err) {

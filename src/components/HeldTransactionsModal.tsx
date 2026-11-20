@@ -168,29 +168,38 @@ export function HeldTransactionsModal({
                       </button>
                     </div>
                   ) : (
-                    <div className="pt-2 border-t border-slate-100 flex items-center justify-end gap-2">
-                      {canCancel && (
-                        <button
-                          type="button"
-                          disabled={isBusy}
-                          onClick={() => setConfirmCancelId(trx.id)}
-                          className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg transition-colors"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          Batalkan
-                        </button>
+                    <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
+                      {!canCancel ? (
+                        <span className="text-[11px] text-slate-400">
+                          Hapus transaksi Hold hanya untuk Supervisor &amp; Admin.
+                        </span>
+                      ) : (
+                        <span />
                       )}
-                      {canResume && (
-                        <button
-                          type="button"
-                          disabled={isBusy}
-                          onClick={() => handleResume(trx)}
-                          className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 rounded-lg transition-colors"
-                        >
-                          <Play className="w-3.5 h-3.5" />
-                          {isBusy ? 'Memuat...' : 'Lanjutkan ke Kasir'}
-                        </button>
-                      )}
+                      <div className="flex items-center justify-end gap-2">
+                        {canCancel && (
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => setConfirmCancelId(trx.id)}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg transition-colors"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            Hapus / Batalkan
+                          </button>
+                        )}
+                        {canResume && (
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => handleResume(trx)}
+                            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 rounded-lg transition-colors"
+                          >
+                            <Play className="w-3.5 h-3.5" />
+                            {isBusy ? 'Memuat...' : 'Lanjutkan ke Kasir'}
+                          </button>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>

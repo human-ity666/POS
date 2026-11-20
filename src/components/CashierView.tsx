@@ -29,6 +29,7 @@ import {
   Trash2,
   UserPlus,
   Users,
+  X,
 } from 'lucide-react';
 import type {
   Customer,
@@ -83,7 +84,66 @@ export interface CashierCheckoutPayload {
   idempotencyKey: string;
 }
 
+interface PersistedCartSnapshot {
+  activeDraftId: string | null;
+  activeDraftNumber: string | null;
+  customerId: string;
+  notes: string;
+  txDiscountType: DiscountMode;
+  txDiscountInput: string;
+  selectedPromotionIds: string[];
+  loyaltyPointsInput: string;
+  applyTax: boolean;
+  items: Array<{
+    productId: string;
+    qty: number;
+    overrideUnitPrice: number | null;
+    lineDiscountType: DiscountMode;
+    lineDiscountValue: number;
+  }>;
+}
+
+function readPersistedCartSnapshot(storageKey: string): PersistedCartSnapshot | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PersistedCartSnapshot>;
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.items)) return null;
+    return {
+      activeDraftId: typeof parsed.activeDraftId === 'string' ? parsed.activeDraftId : null,
+      activeDraftNumber: typeof parsed.activeDraftNumber === 'string' ? parsed.activeDraftNumber : null,
+      customerId: typeof parsed.customerId === 'string' ? parsed.customerId : '',
+      notes: typeof parsed.notes === 'string' ? parsed.notes : '',
+      txDiscountType: parsed.txDiscountType === 'PERCENT' ? 'PERCENT' : 'AMOUNT',
+      txDiscountInput: typeof parsed.txDiscountInput === 'string' ? parsed.txDiscountInput : '',
+      selectedPromotionIds: Array.isArray(parsed.selectedPromotionIds)
+        ? parsed.selectedPromotionIds.filter((x): x is string => typeof x === 'string')
+        : [],
+      loyaltyPointsInput: typeof parsed.loyaltyPointsInput === 'string' ? parsed.loyaltyPointsInput : '',
+      applyTax: typeof parsed.applyTax === 'boolean' ? parsed.applyTax : true,
+      items: parsed.items
+        .filter((item): item is PersistedCartSnapshot['items'][number] =>
+          Boolean(item && typeof item.productId === 'string' && Number(item.qty) > 0)
+        )
+        .map((item) => ({
+          productId: item.productId,
+          qty: Math.max(1, Math.floor(Number(item.qty))),
+          overrideUnitPrice:
+            item.overrideUnitPrice !== null && item.overrideUnitPrice !== undefined
+              ? Number(item.overrideUnitPrice)
+              : null,
+          lineDiscountType: item.lineDiscountType === 'PERCENT' ? 'PERCENT' : 'AMOUNT',
+          lineDiscountValue: Math.max(0, Number(item.lineDiscountValue || 0)),
+        })),
+    };
+  } catch {
+    return null;
+  }
+}
+
 interface CashierViewProps {
+  currentUserId: string;
   products: Product[];
   customers: Customer[];
   paymentMethods: PaymentMethodConfig[];
@@ -91,6 +151,7 @@ interface CashierViewProps {
   settings: StoreSettings;
   loyaltySettings: LoyaltySettings;
   canCreateProduct: boolean;
+  canCreateCustomer?: boolean;
   canApproveDiscount: boolean;
   canOverridePrice: boolean;
   canHold: boolean;
@@ -115,13 +176,21 @@ interface CashierViewProps {
   }) => Promise<Transaction>;
   onResumeHeldTransaction: (trx: Transaction) => Promise<Transaction>;
   onCancelTransaction: (trx: Transaction, reason?: string) => Promise<void>;
-  onCreateCustomer: (input: { name: string; phone?: string }) => Promise<Customer>;
+  onCreateCustomer: (input: {
+    name: string;
+    membershipNumber?: string;
+    phone?: string;
+    email?: string;
+    address?: string;
+    notes?: string;
+  }) => Promise<Customer>;
   onOpenNewProductWithBarcode: (barcode: string) => void;
   onRegisterProductFromAi?: (prefill: RecognitionNewProductPrefill) => void;
   onStoreUpdate?: (store: StoreData) => void;
 }
 
 export function CashierView({
+  currentUserId,
   products,
   customers,
   paymentMethods,
@@ -129,6 +198,7 @@ export function CashierView({
   settings,
   loyaltySettings,
   canCreateProduct,
+  canCreateCustomer = true,
   canApproveDiscount,
   canOverridePrice,
   canHold,
@@ -148,6 +218,13 @@ export function CashierView({
   onRegisterProductFromAi,
   onStoreUpdate,
 }: CashierViewProps) {
+  const cartStorageKey = `kassaritel_pos_cart_v1:${currentUserId || 'default'}`;
+  const initialSnapshotRef = useRef<PersistedCartSnapshot | null | undefined>(undefined);
+  if (initialSnapshotRef.current === undefined) {
+    initialSnapshotRef.current = readPersistedCartSnapshot(cartStorageKey);
+  }
+  const initialSnapshot = initialSnapshotRef.current;
+
   const [mobilePane, setMobilePane] = useState<'catalog' | 'cart'>('catalog');
   const [cameraActive, setCameraActive] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(true);
@@ -157,29 +234,68 @@ export function CashierView({
   const [highlightedIndex, setHighlightedIndex] = useState(0);
   const [selectedCategory, setSelectedCategory] = useState<string>('Semua');
 
-  // Active transaction / cart state
-  const [activeDraftId, setActiveDraftId] = useState<string | null>(null);
-  const [activeDraftNumber, setActiveDraftNumber] = useState<string | null>(null);
-  const [cart, setCart] = useState<CartItem[]>([]);
+  // Active transaction / cart state (persisted across tab switches & reloads)
+  const [activeDraftId, setActiveDraftId] = useState<string | null>(
+    () => initialSnapshot?.activeDraftId ?? null
+  );
+  const [activeDraftNumber, setActiveDraftNumber] = useState<string | null>(
+    () => initialSnapshot?.activeDraftNumber ?? null
+  );
+  const [cart, setCart] = useState<CartItem[]>(() => {
+    if (!initialSnapshot) return [];
+    const hydrated: CartItem[] = [];
+    for (const saved of initialSnapshot.items) {
+      const fresh = products.find((p) => p.id === saved.productId);
+      if (!fresh || fresh.status === 'INACTIVE' || fresh.stock <= 0) continue;
+      hydrated.push({
+        product: fresh,
+        qty: Math.min(saved.qty, fresh.stock),
+        overrideUnitPrice: saved.overrideUnitPrice,
+        lineDiscountType: saved.lineDiscountType,
+        lineDiscountValue: saved.lineDiscountValue,
+      });
+    }
+    return hydrated;
+  });
   const [expandedLineId, setExpandedLineId] = useState<string | null>(null);
-  const [customerId, setCustomerId] = useState<string>('');
-  const [notes, setNotes] = useState('');
-  const [txDiscountType, setTxDiscountType] = useState<DiscountMode>('AMOUNT');
-  const [txDiscountInput, setTxDiscountInput] = useState('');
-  const [selectedPromotionIds, setSelectedPromotionIds] = useState<string[]>([]);
-  const [loyaltyPointsInput, setLoyaltyPointsInput] = useState('');
+  const [customerId, setCustomerId] = useState<string>(() => initialSnapshot?.customerId ?? '');
+  const [notes, setNotes] = useState(() => initialSnapshot?.notes ?? '');
+  const [txDiscountType, setTxDiscountType] = useState<DiscountMode>(
+    () => initialSnapshot?.txDiscountType ?? 'AMOUNT'
+  );
+  const [txDiscountInput, setTxDiscountInput] = useState(
+    () => initialSnapshot?.txDiscountInput ?? ''
+  );
+  const [selectedPromotionIds, setSelectedPromotionIds] = useState<string[]>(
+    () => initialSnapshot?.selectedPromotionIds ?? []
+  );
+  const [loyaltyPointsInput, setLoyaltyPointsInput] = useState(
+    () => initialSnapshot?.loyaltyPointsInput ?? ''
+  );
   const [promoPanelOpen, setPromoPanelOpen] = useState(true);
-  const [applyTax, setApplyTax] = useState(settings.taxEnabled);
+  const [applyTax, setApplyTax] = useState(() =>
+    initialSnapshot ? initialSnapshot.applyTax : settings.taxEnabled
+  );
 
   // Authoritative backend price preview
   const [calcPreview, setCalcPreview] = useState<PosCalculationPreview | null>(null);
   const [calculatingPreview, setCalculatingPreview] = useState(false);
   const [calcError, setCalcError] = useState<string | null>(null);
 
-  // Quick add customer inline form
-  const [quickCustOpen, setQuickCustOpen] = useState(false);
+  // Searchable customer selector state
+  const [customerSearchQuery, setCustomerSearchQuery] = useState('');
+  const [customerDropdownOpen, setCustomerDropdownOpen] = useState(false);
+  const [customerHighlightIndex, setCustomerHighlightIndex] = useState(0);
+
+  // Add Member popup modal state
+  const [addMemberModalOpen, setAddMemberModalOpen] = useState(false);
   const [newCustName, setNewCustName] = useState('');
+  const [newCustMemberNo, setNewCustMemberNo] = useState('');
   const [newCustPhone, setNewCustPhone] = useState('');
+  const [newCustEmail, setNewCustEmail] = useState('');
+  const [newCustAddress, setNewCustAddress] = useState('');
+  const [newCustNotes, setNewCustNotes] = useState('');
+  const [custModalError, setCustModalError] = useState<string | null>(null);
   const [savingCust, setSavingCust] = useState(false);
 
   // Modals
@@ -196,10 +312,66 @@ export function CashierView({
 
   const barcodeInputRef = useRef<HTMLInputElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const prevDefaultTaxRef = useRef(settings.taxEnabled);
 
   useEffect(() => {
-    setApplyTax(settings.taxEnabled);
+    if (prevDefaultTaxRef.current !== settings.taxEnabled) {
+      prevDefaultTaxRef.current = settings.taxEnabled;
+      setApplyTax(settings.taxEnabled);
+    }
   }, [settings.taxEnabled]);
+
+  // Persist cart snapshot continuously so tab switches or page refreshes retain temporary cart state
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const isEmpty =
+      cart.length === 0 &&
+      !activeDraftId &&
+      !customerId &&
+      !notes &&
+      !txDiscountInput &&
+      selectedPromotionIds.length === 0 &&
+      !loyaltyPointsInput;
+    try {
+      if (isEmpty) {
+        window.localStorage.removeItem(cartStorageKey);
+      } else {
+        const snapshot: PersistedCartSnapshot = {
+          activeDraftId,
+          activeDraftNumber,
+          customerId,
+          notes,
+          txDiscountType,
+          txDiscountInput,
+          selectedPromotionIds,
+          loyaltyPointsInput,
+          applyTax,
+          items: cart.map((c) => ({
+            productId: c.product.id,
+            qty: c.qty,
+            overrideUnitPrice: c.overrideUnitPrice,
+            lineDiscountType: c.lineDiscountType,
+            lineDiscountValue: c.lineDiscountValue,
+          })),
+        };
+        window.localStorage.setItem(cartStorageKey, JSON.stringify(snapshot));
+      }
+    } catch {
+      // Ignore storage quota errors gracefully
+    }
+  }, [
+    cartStorageKey,
+    cart,
+    activeDraftId,
+    activeDraftNumber,
+    customerId,
+    notes,
+    txDiscountType,
+    txDiscountInput,
+    selectedPromotionIds,
+    loyaltyPointsInput,
+    applyTax,
+  ]);
 
   const activeProducts = useMemo(
     () => products.filter((p) => p.status !== 'INACTIVE'),
@@ -285,6 +457,8 @@ export function CashierView({
     setActiveDraftNumber(null);
     setExpandedLineId(null);
     setCustomerId('');
+    setCustomerSearchQuery('');
+    setCustomerDropdownOpen(false);
     setNotes('');
     setTxDiscountType('AMOUNT');
     setTxDiscountInput('');
@@ -293,7 +467,14 @@ export function CashierView({
     setApplyTax(settings.taxEnabled);
     setCalcPreview(null);
     setCalcError(null);
-  }, [settings.taxEnabled]);
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.removeItem(cartStorageKey);
+      } catch {
+        // ignore
+      }
+    }
+  }, [settings.taxEnabled, cartStorageKey]);
 
   const serializedCartPayload = useMemo(() => {
     const rawTxDisc = Number(txDiscountInput || 0);
@@ -629,6 +810,68 @@ export function CashierView({
 
   const selectedCustomerName = selectedCustomer?.name ?? 'Pelanggan Umum';
 
+  const activeCustomers = useMemo(
+    () => customers.filter((c) => c.isActive).sort((a, b) => a.name.localeCompare(b.name, 'id')),
+    [customers]
+  );
+
+  const filteredCustomerOptions = useMemo(() => {
+    const q = customerSearchQuery.trim().toLowerCase();
+    if (!q) return activeCustomers.slice(0, 12);
+    return activeCustomers
+      .filter(
+        (c) =>
+          c.name.toLowerCase().includes(q) ||
+          c.membershipNumber.toLowerCase().includes(q) ||
+          c.code.toLowerCase().includes(q) ||
+          c.phone.toLowerCase().includes(q) ||
+          c.email.toLowerCase().includes(q)
+      )
+      .slice(0, 12);
+  }, [activeCustomers, customerSearchQuery]);
+
+  const selectCustomerFromCart = (nextCustomer: Customer | null) => {
+    if (!nextCustomer) {
+      setCustomerId('');
+      setLoyaltyPointsInput('');
+    } else {
+      setCustomerId(nextCustomer.id);
+      if (nextCustomer.id !== customerId) {
+        setLoyaltyPointsInput('');
+      }
+    }
+    setCustomerSearchQuery('');
+    setCustomerDropdownOpen(false);
+    setCustomerHighlightIndex(0);
+  };
+
+  const handleCustomerSearchKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (!customerDropdownOpen) {
+      if (e.key === 'ArrowDown') {
+        setCustomerDropdownOpen(true);
+      }
+      return;
+    }
+    const totalOptions = 1 + filteredCustomerOptions.length; // +1 for Walk-in option at index 0
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setCustomerHighlightIndex((prev) => (prev + 1) % totalOptions);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setCustomerHighlightIndex((prev) => (prev - 1 + totalOptions) % totalOptions);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (customerHighlightIndex === 0) {
+        selectCustomerFromCart(null);
+      } else {
+        const picked = filteredCustomerOptions[customerHighlightIndex - 1];
+        if (picked) selectCustomerFromCart(picked);
+      }
+    } else if (e.key === 'Escape') {
+      setCustomerDropdownOpen(false);
+    }
+  };
+
   const handleTogglePromotion = (promoId: string) => {
     setSelectedPromotionIds((prev) =>
       prev.includes(promoId) ? prev.filter((id) => id !== promoId) : [...prev, promoId]
@@ -652,20 +895,45 @@ export function CashierView({
     setLoyaltyPointsInput(optimal > 0 ? String(optimal) : '');
   };
 
-  const handleCreateQuickCustomer = async (e: FormEvent) => {
+  const openAddMemberModal = () => {
+    setNewCustName('');
+    setNewCustMemberNo('');
+    setNewCustPhone('');
+    setNewCustEmail('');
+    setNewCustAddress('');
+    setNewCustNotes('');
+    setCustModalError(null);
+    setAddMemberModalOpen(true);
+  };
+
+  const handleCreateMemberSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!newCustName.trim()) return;
+    if (!newCustName.trim()) {
+      setCustModalError('Nama member wajib diisi.');
+      return;
+    }
+    setCustModalError(null);
     setSavingCust(true);
     try {
       const created = await onCreateCustomer({
         name: newCustName.trim(),
+        membershipNumber: newCustMemberNo.trim() || undefined,
         phone: newCustPhone.trim(),
+        email: newCustEmail.trim(),
+        address: newCustAddress.trim(),
+        notes: newCustNotes.trim(),
       });
       setCustomerId(created.id);
+      setCustomerSearchQuery('');
+      setCustomerDropdownOpen(false);
       setLoyaltyPointsInput('');
-      setNewCustName('');
-      setNewCustPhone('');
-      setQuickCustOpen(false);
+      setAddMemberModalOpen(false);
+      setBannerMessage({
+        type: 'success',
+        text: `Member baru "${created.name}" (${created.membershipNumber}) berhasil ditambahkan & dipilih di keranjang.`,
+      });
+    } catch (err) {
+      setCustModalError(err instanceof Error ? err.message : 'Gagal menambahkan member baru.');
     } finally {
       setSavingCust(false);
     }
@@ -1103,86 +1371,149 @@ export function CashierView({
                 onClick={handleCancelDraftOrClear}
                 className="text-xs font-medium text-rose-700 hover:text-rose-800 whitespace-nowrap"
               >
-                {activeDraftId ? 'Batalkan Draft' : 'Kosongkan'}
+                {activeDraftId && canCancel ? 'Batalkan Draft' : 'Kosongkan'}
               </button>
             )}
           </div>
 
-          {/* Customer Selector */}
+          {/* Searchable Customer Selector + Popup Add Member Trigger */}
           <div className="px-4 py-2.5 border-b border-slate-100 bg-white space-y-2">
             <div className="flex items-center gap-2">
-              <Users className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-              <select
-                value={customerId}
-                onChange={(e) => {
-                  const nextId = e.target.value;
-                  setCustomerId(nextId);
-                  if (!nextId) setLoyaltyPointsInput('');
-                }}
-                aria-label="Pilih pelanggan"
-                className="flex-1 text-xs px-2.5 py-1.5 border border-slate-300 rounded-lg bg-white"
-              >
-                <option value="">Pelanggan Umum (Walk-in)</option>
-                {customers
-                  .filter((c) => c.isActive)
-                  .map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}
-                      {c.membershipNumber ? ` (${c.membershipNumber})` : ''}
-                      {c.phone ? ` · ${c.phone}` : ''}
-                    </option>
-                  ))}
-              </select>
-              <button
-                type="button"
-                onClick={() => setQuickCustOpen((prev) => !prev)}
-                className="p-1.5 text-slate-600 hover:text-teal-800 border border-slate-300 rounded-lg hover:bg-slate-50"
-                title="Tambah pelanggan cepat"
-                aria-label="Tambah pelanggan cepat"
-              >
-                <UserPlus className="w-3.5 h-3.5" />
-              </button>
+              <div className="relative flex-1 min-w-0">
+                <Users className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={
+                    customerDropdownOpen
+                      ? customerSearchQuery
+                      : selectedCustomer
+                      ? `${selectedCustomer.name}${
+                          selectedCustomer.membershipNumber
+                            ? ` (${selectedCustomer.membershipNumber})`
+                            : ''
+                        }`
+                      : customerSearchQuery
+                  }
+                  onFocus={() => {
+                    setCustomerDropdownOpen(true);
+                    setCustomerHighlightIndex(0);
+                  }}
+                  onBlur={() => window.setTimeout(() => setCustomerDropdownOpen(false), 160)}
+                  onKeyDown={handleCustomerSearchKeyDown}
+                  onChange={(e) => {
+                    setCustomerSearchQuery(e.target.value);
+                    setCustomerDropdownOpen(true);
+                    setCustomerHighlightIndex(0);
+                  }}
+                  placeholder="Cari konsumen (nama, MBR, no HP)..."
+                  aria-label="Cari konsumen di keranjang"
+                  className="w-full text-xs pl-8 pr-7 py-1.5 border border-slate-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-teal-600"
+                />
+                {(selectedCustomer || customerSearchQuery) && (
+                  <button
+                    type="button"
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      selectCustomerFromCart(null);
+                    }}
+                    title="Reset ke Pelanggan Umum"
+                    aria-label="Reset pilihan pelanggan"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+
+                {customerDropdownOpen && (
+                  <div className="absolute left-0 right-0 top-full mt-1 z-30 bg-white border border-slate-200 rounded-xl shadow-lg max-h-56 overflow-y-auto divide-y divide-slate-100">
+                    <button
+                      type="button"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        selectCustomerFromCart(null);
+                      }}
+                      className={`w-full px-3 py-2 text-left text-xs transition-colors flex items-center justify-between ${
+                        customerHighlightIndex === 0
+                          ? 'bg-teal-50 text-teal-900 font-semibold'
+                          : 'hover:bg-slate-50 text-slate-700'
+                      }`}
+                    >
+                      <span>Pelanggan Umum (Walk-in)</span>
+                      {!customerId && (
+                        <span className="text-[10px] font-semibold text-teal-700">Dipilih</span>
+                      )}
+                    </button>
+                    {filteredCustomerOptions.length === 0 ? (
+                      <div className="px-3 py-2.5 text-[11px] text-slate-500">
+                        Tidak ada member cocok untuk &ldquo;{customerSearchQuery}&rdquo;.
+                      </div>
+                    ) : (
+                      filteredCustomerOptions.map((c, idx) => {
+                        const isHighlighted = customerHighlightIndex === idx + 1;
+                        const isSelected = c.id === customerId;
+                        return (
+                          <button
+                            key={c.id}
+                            type="button"
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              selectCustomerFromCart(c);
+                            }}
+                            className={`w-full px-3 py-2 text-left text-xs transition-colors flex items-center justify-between gap-2 ${
+                              isHighlighted
+                                ? 'bg-teal-50'
+                                : isSelected
+                                ? 'bg-teal-50/50'
+                                : 'hover:bg-slate-50'
+                            }`}
+                          >
+                            <div className="min-w-0">
+                              <p className="font-semibold text-slate-900 truncate">{c.name}</p>
+                              <p className="font-mono text-[10px] text-slate-500 truncate">
+                                {c.membershipNumber || c.code}
+                                {c.phone ? ` · ${c.phone}` : ''}
+                              </p>
+                            </div>
+                            <span className="font-mono text-[11px] font-semibold text-teal-800 shrink-0 tabular-nums">
+                              {c.loyaltyPoints.toLocaleString('id-ID')} poin
+                            </span>
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {canCreateCustomer && (
+                <button
+                  type="button"
+                  onClick={openAddMemberModal}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-teal-800 bg-teal-50 border border-teal-200 hover:bg-teal-100 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                  title="Tambah member baru (popup)"
+                  aria-label="Tambah member baru"
+                >
+                  <UserPlus className="w-3.5 h-3.5" />
+                  <span>+ Member</span>
+                </button>
+              )}
             </div>
 
-            {selectedCustomer && (
+            {selectedCustomer ? (
               <div className="flex items-center justify-between text-[11px] text-teal-800 font-mono tabular-nums px-1">
-                <span>Member {selectedCustomer.membershipNumber}</span>
+                <span>
+                  Member {selectedCustomer.membershipNumber || selectedCustomer.code}
+                  {selectedCustomer.phone ? ` · ${selectedCustomer.phone}` : ''}
+                </span>
                 <span className="font-semibold">
                   {selectedCustomer.loyaltyPoints.toLocaleString('id-ID')} poin
                 </span>
               </div>
-            )}
-
-            {quickCustOpen && (
-              <form
-                onSubmit={handleCreateQuickCustomer}
-                className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg space-y-2"
-              >
-                <input
-                  type="text"
-                  required
-                  value={newCustName}
-                  onChange={(e) => setNewCustName(e.target.value)}
-                  placeholder="Nama pelanggan baru"
-                  className="w-full text-xs px-2.5 py-1.5 bg-white border border-slate-300 rounded-md"
-                />
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={newCustPhone}
-                    onChange={(e) => setNewCustPhone(e.target.value)}
-                    placeholder="No. HP (opsional)"
-                    className="flex-1 text-xs px-2.5 py-1.5 bg-white border border-slate-300 rounded-md"
-                  />
-                  <button
-                    type="submit"
-                    disabled={savingCust || !newCustName.trim()}
-                    className="px-3 py-1.5 text-xs font-semibold text-white bg-teal-700 rounded-md disabled:opacity-50"
-                  >
-                    Simpan
-                  </button>
-                </div>
-              </form>
+            ) : (
+              <div className="flex items-center justify-between text-[11px] text-slate-500 px-1">
+                <span>Mode saat ini: Pelanggan Umum (Walk-in)</span>
+                <span>{activeCustomers.length} member aktif</span>
+              </div>
             )}
           </div>
 
@@ -1569,6 +1900,14 @@ export function CashierView({
                   </span>
                 </div>
               )}
+              {loyaltySettings.disableEarnOnRedeem &&
+                (calcPreview?.loyaltyPointsRedeemed ?? 0) > 0 &&
+                (calcPreview?.estimatedPointsEarned ?? 0) === 0 && (
+                  <div className="flex justify-between text-amber-700 text-[11px]">
+                    <span>Poin Baru Transaksi Ini</span>
+                    <span className="font-mono font-semibold">0 poin (aturan tukar poin aktif)</span>
+                  </div>
+                )}
               <div className="flex justify-between items-baseline pt-2 border-t border-slate-200">
                 <span className="text-sm font-bold text-slate-900">Total Bayar</span>
                 <span className="font-mono text-xl font-bold text-teal-800">
@@ -1652,6 +1991,7 @@ export function CashierView({
         paymentMethods={paymentMethods}
         customerName={selectedCustomerName}
         notes={notes.trim()}
+        disableEarnOnRedeem={loyaltySettings.disableEarnOnRedeem}
         onClose={() => setPaymentModalOpen(false)}
         onConfirmPayment={async ({ payments, idempotencyKey }) => {
           await onCheckout({
@@ -1665,6 +2005,133 @@ export function CashierView({
           resetCartState();
         }}
       />
+
+      {/* Popup Add Member Modal */}
+      {addMemberModalOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Tambah Member Baru"
+        >
+          <div className="bg-white border border-slate-200 rounded-xl w-full max-w-md overflow-hidden shadow-xl">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200">
+              <div className="flex items-center gap-2">
+                <UserPlus className="w-4 h-4 text-teal-700" />
+                <h3 className="text-base font-semibold text-slate-900">Tambah Member Baru</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAddMemberModalOpen(false)}
+                className="p-1.5 text-slate-500 hover:text-slate-900 rounded-lg hover:bg-slate-100"
+                aria-label="Tutup modal tambah member"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateMemberSubmit} className="p-5 space-y-3 text-xs">
+              {custModalError && (
+                <div className="p-3 font-medium text-rose-800 bg-rose-50 border border-rose-200 rounded-lg">
+                  {custModalError}
+                </div>
+              )}
+
+              <div>
+                <label className="block font-medium text-slate-700 mb-1">
+                  Nama Lengkap Member *
+                </label>
+                <input
+                  type="text"
+                  required
+                  autoFocus
+                  value={newCustName}
+                  onChange={(e) => setNewCustName(e.target.value)}
+                  placeholder="Contoh: Siti Rahmawati"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-600"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-medium text-slate-700 mb-1">
+                    Nomor Member (Opsional)
+                  </label>
+                  <input
+                    type="text"
+                    value={newCustMemberNo}
+                    onChange={(e) => setNewCustMemberNo(e.target.value)}
+                    placeholder="Otomatis MBR-xxxx"
+                    className="w-full font-mono px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-600"
+                  />
+                </div>
+                <div>
+                  <label className="block font-medium text-slate-700 mb-1">
+                    No. HP / WhatsApp
+                  </label>
+                  <input
+                    type="text"
+                    value={newCustPhone}
+                    onChange={(e) => setNewCustPhone(e.target.value)}
+                    placeholder="0812xxxxxxxx"
+                    className="w-full font-mono px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-600"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-medium text-slate-700 mb-1">Email (Opsional)</label>
+                <input
+                  type="email"
+                  value={newCustEmail}
+                  onChange={(e) => setNewCustEmail(e.target.value)}
+                  placeholder="member@email.com"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-600"
+                />
+              </div>
+
+              <div>
+                <label className="block font-medium text-slate-700 mb-1">Alamat (Opsional)</label>
+                <input
+                  type="text"
+                  value={newCustAddress}
+                  onChange={(e) => setNewCustAddress(e.target.value)}
+                  placeholder="Alamat tempat tinggal / pengiriman"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-600"
+                />
+              </div>
+
+              <div>
+                <label className="block font-medium text-slate-700 mb-1">Catatan</label>
+                <input
+                  type="text"
+                  value={newCustNotes}
+                  onChange={(e) => setNewCustNotes(e.target.value)}
+                  placeholder="Catatan preferensi member (opsional)"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-600"
+                />
+              </div>
+
+              <div className="pt-3 border-t border-slate-200 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setAddMemberModalOpen(false)}
+                  className="px-4 py-2 text-xs font-semibold text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingCust || !newCustName.trim()}
+                  className="px-4 py-2 text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 rounded-lg disabled:opacity-50"
+                >
+                  {savingCust ? 'Menyimpan...' : 'Simpan & Pilih Member'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Held Transactions Modal */}
       <HeldTransactionsModal

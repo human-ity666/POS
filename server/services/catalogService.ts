@@ -1535,9 +1535,21 @@ export function previewProductCsvImport(rawRows: RawCsvImportRow[]): CsvImportPr
     }
 
     if (Number.isNaN(costPrice) || costPrice < 0) errors.push('Harga modal tidak valid');
-    if (Number.isNaN(sellPrice) || sellPrice <= 0) errors.push('Harga jual harus > 0');
+    if (Number.isNaN(sellPrice) || sellPrice <= 0) {
+      errors.push('Harga jual harus > 0');
+    } else if (!Number.isNaN(costPrice) && costPrice >= 0 && Math.round(sellPrice) < Math.round(costPrice)) {
+      errors.push('Harga jual tidak boleh kurang dari harga beli/modal');
+    }
     if (specialPriceRaw !== null && (Number.isNaN(specialPriceRaw) || specialPriceRaw < 0)) {
       errors.push('Harga spesial tidak valid');
+    } else if (
+      specialPriceRaw !== null &&
+      specialPriceRaw > 0 &&
+      !Number.isNaN(costPrice) &&
+      costPrice >= 0 &&
+      Math.round(specialPriceRaw) < Math.round(costPrice)
+    ) {
+      errors.push('Harga spesial tidak boleh kurang dari harga beli/modal');
     }
     if (Number.isNaN(stock) || stock < 0) errors.push('Stok awal tidak valid');
     if (Number.isNaN(minStock) || minStock < 0) errors.push('Minimum stok tidak valid');

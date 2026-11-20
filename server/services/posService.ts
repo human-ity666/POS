@@ -528,9 +528,21 @@ export function createProduct(
   if (sellPrice <= 0) {
     throw new ServiceError(400, 'Harga jual harus lebih besar dari Rp 0.');
   }
+  if (sellPrice < costPrice) {
+    throw new ServiceError(
+      400,
+      'Harga jual tidak boleh kurang dari harga beli/modal.'
+    );
+  }
 
   const specialPriceRaw = parseOptionalDimension(input.specialPrice, 'Harga khusus');
   const specialPrice = specialPriceRaw !== null && specialPriceRaw > 0 ? Math.round(specialPriceRaw) : null;
+  if (specialPrice !== null && specialPrice < costPrice) {
+    throw new ServiceError(
+      400,
+      'Harga khusus/promo tidak boleh kurang dari harga beli/modal.'
+    );
+  }
 
   const initialStock = Math.floor(assertFiniteNonNegative(input.stock ?? 0, 'Stok awal'));
   const minStock = Math.floor(assertFiniteNonNegative(input.minStock ?? 5, 'Batas minimum stok'));
@@ -733,6 +745,12 @@ export function updateProduct(
   if (sellPrice <= 0) {
     throw new ServiceError(400, 'Harga jual harus lebih besar dari Rp 0.');
   }
+  if (sellPrice < costPrice) {
+    throw new ServiceError(
+      400,
+      'Harga jual tidak boleh kurang dari harga beli/modal.'
+    );
+  }
 
   const specialPrice =
     input.specialPrice !== undefined
@@ -741,6 +759,12 @@ export function updateProduct(
           return val !== null && val > 0 ? Math.round(val) : null;
         })()
       : current.specialPrice;
+  if (specialPrice !== null && specialPrice < costPrice) {
+    throw new ServiceError(
+      400,
+      'Harga khusus/promo tidak boleh kurang dari harga beli/modal.'
+    );
+  }
 
   if (input.stock !== undefined && Number(input.stock) !== current.stock) {
     throw new ServiceError(

@@ -183,6 +183,7 @@ export function PromotionsView({
     pointValueRp: String(loyaltySettings.pointValueRp),
     minRedeemPoints: String(loyaltySettings.minRedeemPoints),
     maxRedeemPercent: String(loyaltySettings.maxRedeemPercent),
+    disableEarnOnRedeem: Boolean(loyaltySettings.disableEarnOnRedeem),
   });
   const [savingLoyalty, setSavingLoyalty] = useState(false);
 
@@ -201,6 +202,7 @@ export function PromotionsView({
       pointValueRp: String(loyaltySettings.pointValueRp),
       minRedeemPoints: String(loyaltySettings.minRedeemPoints),
       maxRedeemPercent: String(loyaltySettings.maxRedeemPercent),
+      disableEarnOnRedeem: Boolean(loyaltySettings.disableEarnOnRedeem),
     });
   }, [loyaltySettings]);
 
@@ -479,6 +481,7 @@ export function PromotionsView({
             pointValueRp: Math.round(Number(loyaltyForm.pointValueRp || 100)),
             minRedeemPoints: Math.round(Number(loyaltyForm.minRedeemPoints || 0)),
             maxRedeemPercent: Number(loyaltyForm.maxRedeemPercent || 50),
+            disableEarnOnRedeem: loyaltyForm.disableEarnOnRedeem,
           }),
         }
       );
@@ -569,15 +572,25 @@ export function PromotionsView({
             <span>Program Loyalitas</span>
             <Layers className="w-4 h-4 text-teal-700" />
           </div>
-          <p
-            className={`text-lg font-bold mt-1 ${
-              loyaltySettings.enabled ? 'text-teal-800' : 'text-slate-500'
-            }`}
-          >
-            {loyaltySettings.enabled ? 'Aktif' : 'Nonaktif'}
-          </p>
+          <div className="flex items-baseline justify-between gap-2 mt-1">
+            <p
+              className={`text-lg font-bold ${
+                loyaltySettings.enabled ? 'text-teal-800' : 'text-slate-500'
+              }`}
+            >
+              {loyaltySettings.enabled ? 'Aktif' : 'Nonaktif'}
+            </p>
+            <button
+              type="button"
+              onClick={() => setSubTab('policy')}
+              className="text-[11px] font-semibold text-teal-800 hover:underline"
+            >
+              Atur Poin →
+            </button>
+          </div>
           <p className="text-[11px] text-slate-500 mt-1 font-mono tabular-nums">
-            1 poin / {formatRupiah(loyaltySettings.pointsPerAmount)}
+            1 poin / {formatRupiah(loyaltySettings.pointsPerAmount)} ·{' '}
+            {loyaltySettings.disableEarnOnRedeem ? 'Redeem=0 poin' : 'Redeem tetap dapat poin'}
           </p>
         </div>
       </div>
@@ -894,6 +907,64 @@ export function PromotionsView({
                   }
                   className="w-full font-mono px-3 py-2 border border-slate-300 rounded-lg tabular-nums"
                 />
+              </div>
+            </div>
+
+            {/* Toggle setting for earning points when redeeming points */}
+            <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-xs">
+                  <p className="font-semibold text-slate-900">
+                    Jangan Beri Poin Saat Member Menukarkan Poin (Redeem)
+                  </p>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Mengatur kapan member mendapatkan poin baru saat transaksi menggunakan penukaran poin.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={loyaltyForm.disableEarnOnRedeem}
+                  aria-label="Toggle aturan poin saat penukaran poin"
+                  disabled={!canManage && !canEditSettings}
+                  onClick={() =>
+                    setLoyaltyForm((prev) => ({
+                      ...prev,
+                      disableEarnOnRedeem: !prev.disableEarnOnRedeem,
+                    }))
+                  }
+                  className={`relative inline-flex h-6 w-12 shrink-0 items-center rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-teal-600 disabled:opacity-50 ${
+                    loyaltyForm.disableEarnOnRedeem
+                      ? 'bg-teal-700 border-teal-700'
+                      : 'bg-slate-300 border-slate-300'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+                      loyaltyForm.disableEarnOnRedeem ? 'translate-x-7' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
+              <div className="flex items-center justify-between gap-2 text-[11px] pt-1 border-t border-slate-200/80">
+                <span
+                  className={`font-semibold ${
+                    loyaltyForm.disableEarnOnRedeem ? 'text-teal-800' : 'text-slate-700'
+                  }`}
+                >
+                  {loyaltyForm.disableEarnOnRedeem
+                    ? 'ON · Tukar poin = Tidak dapat poin baru pada transaksi yang sama'
+                    : 'OFF · Tukar poin = Member tetap mendapatkan poin baru dari sisa belanja'}
+                </span>
+                <span
+                  className={`font-mono font-bold px-2 py-0.5 rounded text-[10px] ${
+                    loyaltyForm.disableEarnOnRedeem
+                      ? 'bg-teal-100 text-teal-800'
+                      : 'bg-slate-200 text-slate-700'
+                  }`}
+                >
+                  {loyaltyForm.disableEarnOnRedeem ? 'ON' : 'OFF'}
+                </span>
               </div>
             </div>
 

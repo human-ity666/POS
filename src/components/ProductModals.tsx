@@ -483,6 +483,38 @@ export function ProductFormModal({
       return;
     }
 
+    const parsedCostPrice = Math.round(Number(costPrice || 0));
+    const parsedSellPrice = Math.round(Number(sellPrice || 0));
+    const parsedSpecialPrice = specialPrice.trim() ? Math.round(Number(specialPrice)) : null;
+
+    if (!Number.isFinite(parsedCostPrice) || parsedCostPrice < 0) {
+      setError('Harga beli/modal harus bernilai 0 atau lebih.');
+      return;
+    }
+    if (!Number.isFinite(parsedSellPrice) || parsedSellPrice <= 0) {
+      setError('Harga jual normal harus lebih besar dari Rp 0.');
+      return;
+    }
+    if (parsedSellPrice < parsedCostPrice) {
+      setError('Harga jual normal tidak boleh kurang dari harga beli/modal.');
+      return;
+    }
+    if (
+      parsedSpecialPrice !== null &&
+      (!Number.isFinite(parsedSpecialPrice) || parsedSpecialPrice < 0)
+    ) {
+      setError('Harga khusus/promo tidak valid.');
+      return;
+    }
+    if (
+      parsedSpecialPrice !== null &&
+      parsedSpecialPrice > 0 &&
+      parsedSpecialPrice < parsedCostPrice
+    ) {
+      setError('Harga khusus/promo tidak boleh kurang dari harga beli/modal.');
+      return;
+    }
+
     const selectedUom = uoms.find((u) => u.id === uomId);
     const primaryBarcode = barcodes.find((b) => b.isPrimary)?.barcode ?? barcodes[0].barcode;
 
@@ -994,7 +1026,7 @@ export function ProductFormModal({
                   <input
                     type="number"
                     min="0"
-                    step="100"
+                    step="1"
                     value={costPrice}
                     onChange={(e) => setCostPrice(e.target.value)}
                     required
@@ -1008,7 +1040,7 @@ export function ProductFormModal({
                   <input
                     type="number"
                     min="1"
-                    step="100"
+                    step="1"
                     value={sellPrice}
                     onChange={(e) => setSellPrice(e.target.value)}
                     required
@@ -1022,7 +1054,7 @@ export function ProductFormModal({
                   <input
                     type="number"
                     min="0"
-                    step="100"
+                    step="1"
                     value={specialPrice}
                     onChange={(e) => setSpecialPrice(e.target.value)}
                     placeholder="Kosongkan jika normal"

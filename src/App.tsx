@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   BarChart3,
   Boxes,
   ClipboardCheck,
   History,
   LogOut,
+  Maximize2,
   Menu,
+  Minimize2,
   ReceiptText,
   RefreshCw,
   ScanBarcode,
@@ -94,6 +96,8 @@ export default function App() {
 
   const [activeTab, setActiveTab] = useState<AppTab>('cashier');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [fullCashierMode, setFullCashierMode] = useState(false);
+  const enteredNativeFullscreenRef = useRef(false);
 
   const [storeData, setStoreData] = useState<StoreData | null>(null);
   const [loading, setLoading] = useState(false);
@@ -232,12 +236,54 @@ export default function App() {
       // Even if network fails, clear client state cleanly
     } finally {
       clearStoredTokens();
+      setFullCashierMode(false);
+      enteredNativeFullscreenRef.current = false;
+      if (typeof document !== 'undefined' && document.fullscreenElement) {
+        document.exitFullscreen?.().catch(() => {});
+      }
       setCurrentUser(null);
       setStoreData(null);
       setReceiptTransaction(null);
       setActionError(null);
     }
   };
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const onFullscreenChange = () => {
+      if (!document.fullscreenElement && enteredNativeFullscreenRef.current) {
+        enteredNativeFullscreenRef.current = false;
+        setFullCashierMode(false);
+      }
+    };
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+  }, []);
+
+  const toggleFullCashierMode = useCallback(() => {
+    if (!fullCashierMode) {
+      setActiveTab('cashier');
+      setActiveReceiptId(null);
+      setMobileMenuOpen(false);
+      setFullCashierMode(true);
+      if (typeof document !== 'undefined' && document.documentElement.requestFullscreen) {
+        document.documentElement
+          .requestFullscreen()
+          .then(() => {
+            enteredNativeFullscreenRef.current = true;
+          })
+          .catch(() => {
+            enteredNativeFullscreenRef.current = false;
+          });
+      }
+    } else {
+      setFullCashierMode(false);
+      enteredNativeFullscreenRef.current = false;
+      if (typeof document !== 'undefined' && document.fullscreenElement) {
+        document.exitFullscreen?.().catch(() => {});
+      }
+    }
+  }, [fullCashierMode]);
 
   const lowStockCount = useMemo(() => {
     if (!storeData) return 0;
@@ -364,7 +410,11 @@ export default function App() {
 
   const handleCreateCustomer = async (input: {
     name: string;
+    membershipNumber?: string;
     phone?: string;
+    email?: string;
+    address?: string;
+    notes?: string;
   }): Promise<Customer> => {
     setActionError(null);
     const body = await apiFetch<{ customer: Customer; store: StoreData }>('/api/customers', {
@@ -572,7 +622,8 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex">
       {/* Desktop Sidebar */}
-      <aside className="hidden md:flex md:w-64 md:flex-col md:fixed md:inset-y-0 bg-white border-r border-slate-200 no-print">
+      {!fullCashierMode && (
+        <aside className="hidden md:flex md:w-64 md:flex-col md:fixed md:inset-y-0 bg-white border-r border-slate-200 no-print">
         <div className="h-16 px-5 flex items-center border-b border-slate-200">
           <span className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap">
             KassaRitel
@@ -651,10 +702,11 @@ export default function App() {
             <span>Keluar</span>
           </button>
         </div>
-      </aside>
+        </aside>
+      )}
 
       {/* Mobile Drawer Navigation */}
-      {mobileMenuOpen && (
+      {mobileMenuOpen && !fullCashierMode && (
         <div className="fixed inset-0 z-50 md:hidden bg-slate-900/50 flex no-print">
           <div className="w-64 bg-white h-full border-r border-slate-200 flex flex-col">
             <div className="h-14 px-4 flex items-center justify-between border-b border-slate-200">
@@ -734,17 +786,19 @@ export default function App() {
       )}
 
       {/* Main Content Shell */}
-      <div className="flex-1 md:pl-64 flex flex-col min-w-0">
+      <div className={`flex-1 flex flex-col min-w-0 ${fullCashierMode ? '' : 'md:pl-64'}`}>
         <header className="h-16 bg-white border-b border-slate-200 px-4 sm:px-6 flex items-center justify-between gap-4 sticky top-0 z-30 no-print">
           <div className="flex items-center gap-3 min-w-0">
-            <button
-              type="button"
-              onClick={() => setMobileMenuOpen(true)}
-              className="md:hidden p-2 -ml-2 text-slate-600 hover:text-slate-900 rounded-lg hover:bg-slate-100"
-              aria-label="Buka navigasi"
-            >
-              <Menu className="w-5 h-5" />
-            </button>
+            {!fullCashierMode && (
+              <button
+                type="button"
+                onClick={() => setMobileMenuOpen(true)}
+                className="md:hidden p-2 -ml-2 text-slate-600 hover:text-slate-900 rounded-lg hover:bg-slate-100"
+                aria-label="Buka navigasi"
+              >
+                <Menu className="w-5 h-5" />
+              </button>
+            )}
             <div className="flex items-center gap-2 text-sm min-w-0">
               <span className="text-slate-500 hidden sm:inline truncate">
                 {storeData?.settings.storeName || 'Toko Ritel'}
@@ -757,24 +811,37 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
-            {canCreateProduct && (
+            {hasAnyPermission(['pos:view']) && (
               <button
                 type="button"
-                onClick={() => {
-                  setEditingProduct(null);
-                  setPrefillBarcode(undefined);
-                  setAiPrefill(null);
-                  setProductModalOpen(true);
-                }}
-                className="px-3.5 py-2 text-xs font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                onClick={toggleFullCashierMode}
+                className={`inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg border transition-colors whitespace-nowrap shrink-0 ${
+                  fullCashierMode
+                    ? 'bg-slate-900 text-white border-slate-900 hover:bg-slate-800'
+                    : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                }`}
               >
-                + Tambah Produk
+                {fullCashierMode ? (
+                  <>
+                    <Minimize2 className="w-3.5 h-3.5" />
+                    <span>Keluar Full Kasir</span>
+                  </>
+                ) : (
+                  <>
+                    <Maximize2 className="w-3.5 h-3.5 text-teal-700" />
+                    <span>Full Kasir</span>
+                  </>
+                )}
               </button>
             )}
           </div>
         </header>
 
-        <main className="flex-1 p-4 sm:p-6 max-w-[1440px] w-full mx-auto">
+        <main
+          className={`flex-1 p-4 sm:p-6 w-full mx-auto ${
+            fullCashierMode ? 'max-w-none' : 'max-w-[1440px]'
+          }`}
+        >
           {!isTabAuthorized ? (
             <AccessDeniedView
               requiredPermission={activeNavDef?.requiredAnyPermissions?.join(' / ')}
@@ -828,6 +895,7 @@ export default function App() {
                 <>
                   {activeTab === 'cashier' && (
                     <CashierView
+                      currentUserId={currentUser.id}
                       products={storeData.products}
                       customers={storeData.customers ?? []}
                       paymentMethods={storeData.paymentMethods ?? []}
@@ -835,6 +903,7 @@ export default function App() {
                       settings={storeData.settings}
                       loyaltySettings={storeData.loyaltySettings}
                       canCreateProduct={canCreateProduct}
+                      canCreateCustomer={canCreateCustomer}
                       canApproveDiscount={canApproveDiscount}
                       canOverridePrice={canOverridePrice}
                       canHold={canHoldTransaction}

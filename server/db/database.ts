@@ -133,7 +133,6 @@ const ROLE_PERMISSION_MAP: Record<string, string[]> = {
     'pos:create',
     'pos:hold',
     'pos:resume',
-    'pos:cancel',
     'recognition:use',
     'products:view',
     'transactions:view',
@@ -692,7 +691,6 @@ function seedRbacIfEmpty(db: DatabaseSync): void {
     for (const code of [
       'pos:hold',
       'pos:resume',
-      'pos:cancel',
       'recognition:use',
       'customers:view',
       'customers:create',

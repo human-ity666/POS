@@ -32,6 +32,7 @@ interface PaymentModalProps {
   paymentMethods: PaymentMethodConfig[];
   customerName: string;
   notes: string;
+  disableEarnOnRedeem?: boolean;
   onClose: () => void;
   onConfirmPayment: (payload: {
     payments: SubmittedPaymentLine[];
@@ -68,6 +69,7 @@ export function PaymentModal({
   paymentMethods,
   customerName,
   notes,
+  disableEarnOnRedeem = false,
   onClose,
   onConfirmPayment,
 }: PaymentModalProps) {
@@ -361,6 +363,14 @@ export function PaymentModal({
                 </span>
               </div>
             )}
+            {disableEarnOnRedeem &&
+              (preview?.loyaltyPointsRedeemed ?? 0) > 0 &&
+              (preview?.estimatedPointsEarned ?? 0) === 0 && (
+                <div className="flex justify-between text-amber-700 text-[11px]">
+                  <span>Perolehan Poin Transaksi Ini</span>
+                  <span className="font-mono font-semibold">0 poin (aturan tukar poin aktif)</span>
+                </div>
+              )}
             <div className="flex items-baseline justify-between pt-2 border-t border-slate-200">
               <span className="text-sm font-bold text-slate-900">Total Tagihan (Server)</span>
               <span className="font-mono text-2xl font-bold text-teal-800">
