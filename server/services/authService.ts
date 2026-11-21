@@ -15,6 +15,8 @@ const PIN_ACTION_REQUIRED_PERMISSION: Record<PinSensitiveAction, string> = {
   void: 'pos:void',
   refund: 'pos:refund',
   stock_adjustment: 'stock:adjust',
+  item_cancel: 'pos:item_cancel',
+  shift_discrepancy: 'shifts:approve',
 };
 
 interface DbUserRow {
@@ -628,4 +630,56 @@ export function changeOwnPassword(
     actor: row.full_name,
     summary: `Pengguna ${row.username} mengubah kata sandinya sendiri`,
   });
+}
+
+export function authorizeCartItemCancel(params: {
+  actor: UserSummary;
+  pinApprovalToken?: unknown;
+  productId?: unknown;
+  productName?: unknown;
+  qty?: unknown;
+}): { authorized: boolean; method: 'PERMISSION' | 'PIN'; authorizerUserId: string | null } {
+  const db = getDb();
+  const productName =
+    typeof params.productName === 'string' && params.productName.trim()
+      ? params.productName.trim()
+      : 'Item keranjang';
+  const productId =
+    typeof params.productId === 'string' && params.productId.trim()
+      ? params.productId.trim()
+      : 'cart-item';
+  const qty = Math.max(1, Math.floor(Number(params.qty || 1)));
+
+  if (params.actor.permissions.includes('pos:item_cancel')) {
+    recordAuditLog(db, {
+      action: 'ITEM_CANCELLED',
+      entityType: 'transaction',
+      entityId: productId,
+      actorUserId: params.actor.id,
+      actor: params.actor.fullName,
+      summary: `Batalkan item di keranjang: "${productName}" (${qty}x) oleh ${params.actor.fullName}`,
+    });
+    return { authorized: true, method: 'PERMISSION', authorizerUserId: params.actor.id };
+  }
+
+  const rawToken =
+    typeof params.pinApprovalToken === 'string' ? params.pinApprovalToken.trim() : '';
+  if (!rawToken) {
+    throw new ServiceError(
+      403,
+      'Akun Anda tidak memiliki izin Batalkan Item. Diperlukan otorisasi PIN Supervisor atau Admin.',
+      'ITEM_CANCEL_PIN_REQUIRED'
+    );
+  }
+
+  const { authorizerUserId } = consumePinApprovalToken(db, rawToken, 'item_cancel');
+  recordAuditLog(db, {
+    action: 'ITEM_CANCELLED',
+    entityType: 'transaction',
+    entityId: productId,
+    actorUserId: params.actor.id,
+    actor: params.actor.fullName,
+    summary: `Batalkan item di keranjang: "${productName}" (${qty}x) dengan otorisasi PIN (${authorizerUserId})`,
+  });
+  return { authorized: true, method: 'PIN', authorizerUserId };
 }

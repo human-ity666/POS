@@ -1,12 +1,14 @@
-import { Printer, ReceiptText, X } from 'lucide-react';
+import { Printer, ReceiptText, RotateCcw, X } from 'lucide-react';
 import type { Transaction, TransactionStatus } from '../types';
 import { formatDateTime, formatRupiah } from '../utils/format';
 
 interface TransactionDetailModalProps {
   transaction: Transaction | null;
+  canReturnVoid?: boolean;
   onClose: () => void;
   onPrintReceipt: (trx: Transaction) => void;
   onOpenReceiptDetail?: (trx: Transaction) => void;
+  onOpenReturnVoid?: (trx: Transaction) => void;
   onResumeHeld?: (trx: Transaction) => void;
   onCancelHeld?: (trx: Transaction) => void;
 }
@@ -17,13 +19,16 @@ const STATUS_LABEL: Record<TransactionStatus, { text: string; cls: string }> = {
   HELD: { text: 'DITAHAN', cls: 'text-amber-700' },
   CANCELLED: { text: 'DIBATALKAN', cls: 'text-rose-700' },
   COMPLETED: { text: 'SELESAI', cls: 'text-emerald-700' },
+  VOIDED: { text: 'DI-VOID', cls: 'text-rose-700' },
 };
 
 export function TransactionDetailModal({
   transaction,
+  canReturnVoid = true,
   onClose,
   onPrintReceipt,
   onOpenReceiptDetail,
+  onOpenReturnVoid,
   onResumeHeld,
   onCancelHeld,
 }: TransactionDetailModalProps) {
@@ -76,6 +81,29 @@ export function TransactionDetailModal({
               <p className="font-semibold text-slate-900 mt-0.5">{transaction.paymentMethod}</p>
             </div>
           </div>
+
+          {transaction.status === 'VOIDED' && (
+            <div className="p-3 text-xs bg-rose-50 border border-rose-200 rounded-lg text-rose-900 space-y-0.5">
+              <p className="font-bold">
+                Transaksi Di-Void ({transaction.voidNumber || 'VOID'})
+              </p>
+              <p>
+                Alasan: {transaction.voidReason || '-'} · Disetujui oleh:{' '}
+                {transaction.voidApprovedByName || transaction.voidedByName || 'Supervisor'}
+                {transaction.voidedAt ? ` pada ${formatDateTime(transaction.voidedAt)}` : ''}
+              </p>
+            </div>
+          )}
+
+          {transaction.status === 'COMPLETED' && (transaction.refundedTotal ?? 0) > 0 && (
+            <div className="p-3 text-xs bg-amber-50 border border-amber-200 rounded-lg text-amber-900">
+              Status Retur: <span className="font-bold">{transaction.returnStatus}</span> · Total
+              Refund Tercatat:{' '}
+              <span className="font-mono font-bold">
+                {formatRupiah(transaction.refundedTotal ?? 0)}
+              </span>
+            </div>
+          )}
 
           {transaction.notes && (
             <div className="p-3 text-xs bg-amber-50/70 border border-amber-200 rounded-lg text-amber-900">
@@ -294,7 +322,23 @@ export function TransactionDetailModal({
                 Lanjutkan di Kasir
               </button>
             )}
-          {transaction.status === 'COMPLETED' && (
+          {transaction.status === 'COMPLETED' && onOpenReturnVoid && (
+            <button
+              type="button"
+              disabled={!canReturnVoid}
+              title={
+                !canReturnVoid
+                  ? 'Akun Anda tidak memiliki hak akses Retur / Refund atau Void Transaksi.'
+                  : undefined
+              }
+              onClick={() => onOpenReturnVoid(transaction)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-200 rounded-lg hover:bg-rose-100 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              Retur / Void
+            </button>
+          )}
+          {(transaction.status === 'COMPLETED' || transaction.status === 'VOIDED') && (
             <>
               {onOpenReceiptDetail && (
                 <button

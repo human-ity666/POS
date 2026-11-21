@@ -852,8 +852,8 @@ export function PromotionsView({
                 </label>
                 <input
                   type="number"
-                  min={1000}
-                  step={500}
+                  min={100}
+                  step={1}
                   disabled={!canManage && !canEditSettings}
                   value={loyaltyForm.pointsPerAmount}
                   onChange={(e) =>
@@ -868,7 +868,8 @@ export function PromotionsView({
                 </label>
                 <input
                   type="number"
-                  min={1}
+                  min={0}
+                  step={1}
                   disabled={!canManage && !canEditSettings}
                   value={loyaltyForm.pointValueRp}
                   onChange={(e) =>
@@ -884,6 +885,7 @@ export function PromotionsView({
                 <input
                   type="number"
                   min={0}
+                  step={1}
                   disabled={!canManage && !canEditSettings}
                   value={loyaltyForm.minRedeemPoints}
                   onChange={(e) =>
@@ -898,8 +900,9 @@ export function PromotionsView({
                 </label>
                 <input
                   type="number"
-                  min={1}
+                  min={0}
                   max={100}
+                  step={1}
                   disabled={!canManage && !canEditSettings}
                   value={loyaltyForm.maxRedeemPercent}
                   onChange={(e) =>

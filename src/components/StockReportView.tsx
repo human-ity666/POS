@@ -154,6 +154,10 @@ export function StockReportView({
         return 'Penyesuaian (-)';
       case 'OPNAME':
         return 'Stok Opname';
+      case 'RETURN_IN':
+        return 'Retur Layak Jual (+)';
+      case 'VOID_IN':
+        return 'Void Transaksi (+)';
       case 'STOK_AWAL':
         return 'Stok Awal';
     }
@@ -374,6 +378,8 @@ export function StockReportView({
                   { id: 'ADJUSTMENT_IN', label: 'Adj (+)' },
                   { id: 'ADJUSTMENT_OUT', label: 'Adj (-)' },
                   { id: 'OPNAME', label: 'Opname' },
+                  { id: 'RETURN_IN', label: 'Retur (+)' },
+                  { id: 'VOID_IN', label: 'Void (+)' },
                 ] as const
               ).map((f) => (
                 <button

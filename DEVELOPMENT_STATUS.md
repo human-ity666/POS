@@ -1,6 +1,6 @@
 # Development Status — KassaRitel POS
 
-Terakhir diperbarui: 2026-11-19
+Terakhir diperbarui: 2026-11-20
 
 ## Ringkasan Status Fase
 
@@ -128,14 +128,54 @@ Fitur yang sudah selesai dan terverifikasi:
 
 ---
 
-## Keterbatasan & Ruang Lingkup Fase Berikutnya (Phase 10+)
+### Phase 10: Shift & Cash Management — **COMPLETED**
+
+Fitur yang sudah selesai dan terverifikasi:
+
+1. **Migrasi Database & RBAC Shift Kasir (`server/db/migrations/011_shift_cash_management.sql`, `server/db/database.ts`)**:
+   - Menambahkan tabel `shift_settings` (kebijakan wajib buka shift sebelum penjualan, izin multi-shift terbuka per kasir, kewajiban persetujuan supervisor atas selisih kas, dan toleransi selisih Rp), `cashier_shifts` (`SHF-YYYYMMDD-XXXX`), serta `cash_movements` (`CM-YYYYMMDD-XXXX` untuk `CASH_IN`, `CASH_OUT`, `EXPENSE`, `CASH_REFUND`).
+   - Menambahkan kolom `shift_id` pada tabel `transactions` dan memperluas `pin_authorizations` untuk mendukung aksi PIN `shift_discrepancy`.
+   - Menambahkan 5 izin granular modul **Shift & Kas** (`shifts:view`, `shifts:open`, `shifts:cash_movement`, `shifts:approve`, `shifts:manage`).
+
+2. **Mesin Rekonsiliasi Kas BigInt & Siklus Hidup Shift (`server/services/shiftService.ts`, `server/services/checkoutService.ts`)**:
+   - **Buka Shift & Pencegahan Shift Ganda**: Kasir membuka shift dengan modal awal kas, nama kasir/register, dan catatan pembukaan; sistem mencegah duplikasi shift terbuka per kasir jika `allow_duplicate_open_shifts` bernilai nonaktif (`409 SHIFT_ALREADY_OPEN`).
+   - **Mutasi Kas Laci (`Cash Movement`)**: Pencatatan kas masuk, kas keluar, pengeluaran operasional laci, serta refund tunai dengan nominal positif, alasan wajib, referensi dokumen, pelaku, dan stempel waktu.
+   - **Rekonsiliasi Otomatis Zero-Float**: Menghitung `expectedCash = openingCash + cashSales + cashInTotal - cashOutTotal - expenseTotal - cashRefunds` serta melacak `cashReceived` (gross diterima kasir), `cashChangeGiven`, `nonCashSales`, breakdown metode pembayaran, dan selisih (`actualCash - expectedCash`).
+   - **Tutup Kasir, Pecahan Uang & Persetujuan Selisih**: Penghitung pecahan uang Rupiah (Rp 100 s.d. Rp 100.000) atau input tunai manual, konfirmasi tutup kasir wajib, serta persetujuan selisih baik langsung saat tutup shift dengan PIN Supervisor (`shift_discrepancy`) maupun peninjauan pasca-tutup oleh Supervisor (`PENDING_APPROVAL` → `APPROVED`).
+
+3. **Antarmuka Kasir, Laporan Shift & Audit (`ShiftView.tsx`, `ShiftModals.tsx`, `CashierView.tsx`)**:
+   - Status bar shift langsung di terminal kasir lengkap dengan modal Buka Shift instan serta penegakan opsional wajib buka shift sebelum checkout (`SHIFT_REQUIRED`).
+   - Halaman khusus **Shift & Kas Kasir** dengan 3 sub-tab (`Shift Aktif & Mutasi Kas`, `Riwayat & Laporan Shift`, `Konfigurasi Shift`), ekspor CSV riwayat shift, serta modal Laporan Shift siap cetak (`@media print`).
+
+---
+
+### Phase 11: Return, Refund & Void — **COMPLETED**
+
+Fitur yang sudah selesai dan terverifikasi:
+
+1. **Migrasi Database & Pelacakan Arsip Historis (`server/db/migrations/012_return_refund_void.sql`)**:
+   - Memperluas tabel `transactions` dengan status `'VOIDED'`, `payment_status` (`'PARTIALLY_REFUNDED'`, `'REFUNDED'`), `return_status` (`'NONE'`, `'PARTIAL'`, `'FULL'`), `returned_total`, `refunded_total`, serta jejak `void_number`, `void_reason`, `voided_at`, `voided_by_*`, dan `void_approved_by_*`.
+   - Memperluas `stock_movements` untuk tipe mutasi `RETURN_IN` dan `VOID_IN` serta menambahkan tabel `transaction_returns` (`RET-YYYYMMDD-XXXX`), `transaction_return_items`, `transaction_voids` (`VOID-YYYYMMDD-XXXX`), dan `refund_records` (`RFD-YYYYMMDD-XXXX`).
+
+2. **Mesin Retur, Disposisi Stok QC, Refund & Void Zero-Float (`server/services/returnVoidService.ts`)**:
+   - **Pencarian Struk & Kalkulasi Proporsional `BigInt`**: Pencarian transaksi berdasarkan nomor struk (`receipt_number`), nomor invoice, pelanggan, atau nama produk; pratinjau kalkulasi retur menggunakan harga historis transaksi dan alokasi proporsional `allocateProportionally` sehingga total refund bertahap sama persis dengan total transaksi asli.
+   - **Perlindungan Data & Idempotensi**: Melarang retur melebihi sisa kuantitas terjual, melarang duplikasi melalui `idempotency_key`, memvalidasi batas maksimum refund, serta **tidak pernah menghapus transaksi selesai** (`DELETE` pada `COMPLETED` maupun `VOIDED` ditolak `409 Conflict`).
+   - **Disposisi Stok & Inspeksi QC**: Mendukung `SELLABLE` (restok otomatis via `RETURN_IN`), `DAMAGED`, `UNSELLABLE`, dan `PENDING_INSPECTION` (tidak menambah stok jual sampai keputusan QC selesai melalui `/api/returns/items/:itemId/resolve-inspection`).
+   - **Refund Tunai & Non-Tunai + Integrasi Shift & Loyalitas**: Refund tunai otomatis mencatat mutasi `CASH_REFUND` pada shift aktif kasir; void pada shift yang masih `OPEN` tidak mengurangi kas laci dua kali dan mengembalikan stok (`VOID_IN`) serta poin loyalitas secara konsisten.
+   - **RBAC & Otorisasi PIN Supervisor**: Membutuhkan izin `pos:refund` / `pos:void` atau verifikasi PIN single-use Supervisor/Admin (`action: 'refund' | 'void'`) dengan pencatatan lengkap ke `audit_logs`.
+
+3. **Antarmuka Retur, Refund, Void & Struk Historis (`ReturnVoidView.tsx`, `ReturnVoidModals.tsx`, `TransactionsView.tsx`, `TransactionDetailModal.tsx`, `ReceiptDocument.tsx`)**:
+   - Halaman khusus **Retur, Refund & Void** dengan 4 ringkasan KPI dan 4 sub-tab (`Cari & Proses Retur / Void`, `Riwayat Retur & QC`, `Buku Refund`, `Riwayat Void`) serta shortcut langsung dari *Riwayat Transaksi* dan *Detail Transaksi*.
+   - Penandaan visual status `DI-VOID` / `Retur Tercatat` pada riwayat transaksi, detail transaksi, dan struk cetak tanpa mengubah nilai nominal historis struk asli.
+
+---
+
+## Keterbatasan & Ruang Lingkup Fase Berikutnya (Phase 12+)
 
 1. **Komunikasi Hardware Printer Thermal Langsung (ESC/POS USB / Bluetooth / Serial)**:
    - Pencetakan fisik saat ini menggunakan dialog cetak sistem/browser (`window.print()` dengan CSS `@media print` untuk `58mm`, `80mm`, dan `A4`) serta ekspor struk digital HTML.
-2. **Void & Refund Transaksi Selesai**:
-   - Transaksi berstatus `COMPLETED` dilindungi agar tidak dapat dihapus fisik; alur Void/Retur resmi dengan otorisasi PIN dan pemulihan stok otomatis dijadwalkan pada fase berikutnya.
-3. **Shift Kasir & Tutup Kasir (Cash Drawer / Z-Report)**:
-   - Buka/tutup shift kasir dan rekonsiliasi selisih kas laci dijadwalkan pada fase berikutnya.
+2. **Laporan Analitik & Eksekutif Lanjutan (Phase 12)**:
+   - Dashboard analitik multi-periode, laporan margin produk/kategori mendalam, dan ringkasan pajak periode dijadwalkan pada fase berikutnya.
 
 ---
 
@@ -143,7 +183,4 @@ Fitur yang sudah selesai dan terverifikasi:
 
 - `npm run lint` (`tsc --noEmit` dengan `strict: true`): Lulus tanpa error.
 - `npm run build` (`vite build`): Kompilasi bundle produksi berhasil.
-- `npm test` (`tsx --test tests/pos.test.ts`): Seluruh skenario unit & integrasi (Phase 02–Phase 09) lulus.
-
-
-
+- `npm test` (`tsx --test tests/pos.test.ts`): Seluruh skenario unit & integrasi (Phase 02–Phase 11) lulus.

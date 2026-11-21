@@ -75,7 +75,7 @@ const CUSTOMER_AGGREGATE_QUERY = `
   LEFT JOIN (
     SELECT
       customer_id,
-      SUM(total) AS total_spending,
+      SUM(CASE WHEN total > COALESCE(refunded_total, 0) THEN total - COALESCE(refunded_total, 0) ELSE 0 END) AS total_spending,
       COUNT(*) AS transaction_count,
       MAX(COALESCE(completed_at, created_at)) AS last_purchase_date
     FROM transactions

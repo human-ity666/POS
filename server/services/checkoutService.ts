@@ -286,11 +286,22 @@ function mapTransactionRows(
     total_cost: number;
     gross_profit: number;
     notes: string;
+    shift_id?: string | null;
     cashier_id: string | null;
     cashier_name: string;
     held_at: string | null;
     cancelled_at: string | null;
     completed_at: string | null;
+    return_status?: 'NONE' | 'PARTIAL' | 'FULL';
+    returned_total?: number;
+    refunded_total?: number;
+    void_number?: string | null;
+    void_reason?: string | null;
+    voided_at?: string | null;
+    voided_by_user_id?: string | null;
+    voided_by_name?: string | null;
+    void_approved_by_user_id?: string | null;
+    void_approved_by_name?: string | null;
     created_at: string;
     updated_at: string;
   }>
@@ -299,7 +310,7 @@ function mapTransactionRows(
   const db = getDb();
 
   const itemStmt = db.prepare(`
-    SELECT product_id, sku, barcode, name, unit, qty,
+    SELECT id, product_id, sku, barcode, name, unit, qty,
            original_sell_price, sell_price, price_override, cost_price,
            line_discount_type, line_discount_value, line_discount_amount,
            promotion_id, promotion_name, promotion_discount_amount,
@@ -307,6 +318,13 @@ function mapTransactionRows(
     FROM transaction_items
     WHERE transaction_id = ?
     ORDER BY id ASC
+  `);
+
+  const returnedByItemStmt = db.prepare(`
+    SELECT transaction_item_id, COALESCE(SUM(qty), 0) AS returned_qty
+    FROM transaction_return_items
+    WHERE transaction_id = ?
+    GROUP BY transaction_item_id
   `);
 
   const payStmt = db.prepare(`
@@ -319,6 +337,7 @@ function mapTransactionRows(
 
   return trxRows.map((t) => {
     const itemRows = itemStmt.all(t.id) as Array<{
+      id: string;
       product_id: string;
       sku: string;
       barcode: string;
@@ -340,6 +359,12 @@ function mapTransactionRows(
       subtotal: number;
     }>;
 
+    const returnedRows = returnedByItemStmt.all(t.id) as Array<{
+      transaction_item_id: string;
+      returned_qty: number;
+    }>;
+    const returnedQtyMap = new Map(returnedRows.map((r) => [r.transaction_item_id, Number(r.returned_qty ?? 0)]));
+
     const payRows = payStmt.all(t.id) as Array<{
       id: string;
       payment_method_id: string | null;
@@ -352,27 +377,33 @@ function mapTransactionRows(
       created_at: string;
     }>;
 
-    const items: TransactionItem[] = itemRows.map((i) => ({
-      productId: i.product_id,
-      sku: i.sku || undefined,
-      barcode: i.barcode,
-      name: i.name,
-      unit: i.unit,
-      qty: i.qty,
-      originalSellPrice: i.original_sell_price,
-      sellPrice: i.sell_price,
-      priceOverride: i.price_override === 1,
-      costPrice: i.cost_price,
-      lineDiscountType: i.line_discount_type,
-      lineDiscountValue: i.line_discount_value,
-      lineDiscountAmount: i.line_discount_amount,
-      promotionId: i.promotion_id ?? null,
-      promotionName: i.promotion_name || undefined,
-      promotionDiscountAmount: Number(i.promotion_discount_amount ?? 0),
-      taxCategory: i.tax_category,
-      taxAmount: i.tax_amount,
-      subtotal: i.subtotal,
-    }));
+    const items: TransactionItem[] = itemRows.map((i) => {
+      const returnedQty = returnedQtyMap.get(i.id) ?? 0;
+      return {
+        id: i.id,
+        productId: i.product_id,
+        sku: i.sku || undefined,
+        barcode: i.barcode,
+        name: i.name,
+        unit: i.unit,
+        qty: i.qty,
+        returnedQty,
+        remainingReturnableQty: t.status === 'VOIDED' ? 0 : Math.max(0, i.qty - returnedQty),
+        originalSellPrice: i.original_sell_price,
+        sellPrice: i.sell_price,
+        priceOverride: i.price_override === 1,
+        costPrice: i.cost_price,
+        lineDiscountType: i.line_discount_type,
+        lineDiscountValue: i.line_discount_value,
+        lineDiscountAmount: i.line_discount_amount,
+        promotionId: i.promotion_id ?? null,
+        promotionName: i.promotion_name || undefined,
+        promotionDiscountAmount: Number(i.promotion_discount_amount ?? 0),
+        taxCategory: i.tax_category,
+        taxAmount: i.tax_amount,
+        subtotal: i.subtotal,
+      };
+    });
 
     const payments: TransactionPaymentRecord[] = payRows.map((p) => ({
       id: p.id,
@@ -415,11 +446,22 @@ function mapTransactionRows(
       totalCost: t.total_cost,
       grossProfit: t.gross_profit,
       notes: t.notes,
+      shiftId: t.shift_id ?? null,
       cashierId: t.cashier_id,
       cashierName: t.cashier_name,
       heldAt: t.held_at,
       cancelledAt: t.cancelled_at,
       completedAt: t.completed_at,
+      returnStatus: t.return_status ?? 'NONE',
+      returnedTotal: Number(t.returned_total ?? 0),
+      refundedTotal: Number(t.refunded_total ?? 0),
+      voidNumber: t.void_number ?? null,
+      voidReason: t.void_reason ?? null,
+      voidedAt: t.voided_at ?? null,
+      voidedByUserId: t.voided_by_user_id ?? null,
+      voidedByName: t.voided_by_name ?? null,
+      voidApprovedByUserId: t.void_approved_by_user_id ?? null,
+      voidApprovedByName: t.void_approved_by_name ?? null,
       createdAt: t.created_at,
       updatedAt: t.updated_at,
     };
@@ -433,7 +475,9 @@ const TRANSACTION_SELECT_COLS = `
   loyalty_points_redeemed, loyalty_discount_amount, applied_promotions_json,
   discount_amount, apply_tax, tax_amount, total,
   cash_received, change_amount, payment_method, total_cost, gross_profit,
-  notes, cashier_id, cashier_name, held_at, cancelled_at, completed_at,
+  notes, shift_id, cashier_id, cashier_name, held_at, cancelled_at, completed_at,
+  return_status, returned_total, refunded_total, void_number, void_reason,
+  voided_at, voided_by_user_id, voided_by_name, void_approved_by_user_id, void_approved_by_name,
   created_at, updated_at
 `;
 
@@ -466,6 +510,20 @@ export function listCustomerTransactions(customerId: string, limit = 100): Trans
   return mapTransactionRows(rows);
 }
 
+export function listShiftTransactions(shiftId: string, limit = 500): Transaction[] {
+  const db = getDb();
+  const rows = db
+    .prepare(`
+      SELECT ${TRANSACTION_SELECT_COLS}
+      FROM transactions
+      WHERE shift_id = ? AND status = 'COMPLETED'
+      ORDER BY completed_at DESC, created_at DESC
+      LIMIT ?
+    `)
+    .all(shiftId, limit) as Parameters<typeof mapTransactionRows>[0];
+  return mapTransactionRows(rows);
+}
+
 export function listHeldTransactions(): Transaction[] {
   const db = getDb();
   const rows = db
@@ -481,9 +539,19 @@ export function listHeldTransactions(): Transaction[] {
 
 export function getTransactionById(id: string): Transaction {
   const db = getDb();
-  const row = db
+  let row = db
     .prepare(`SELECT ${TRANSACTION_SELECT_COLS} FROM transactions WHERE id = ? OR invoice_number = ?`)
     .get(id, id) as Parameters<typeof mapTransactionRows>[0][number] | undefined;
+  if (!row) {
+    const snap = db
+      .prepare('SELECT transaction_id FROM receipt_snapshots WHERE receipt_number = ? LIMIT 1')
+      .get(id) as { transaction_id: string } | undefined;
+    if (snap) {
+      row = db
+        .prepare(`SELECT ${TRANSACTION_SELECT_COLS} FROM transactions WHERE id = ?`)
+        .get(snap.transaction_id) as Parameters<typeof mapTransactionRows>[0][number] | undefined;
+    }
+  }
   if (!row) {
     throw new ServiceError(404, 'Transaksi tidak ditemukan.');
   }
@@ -991,6 +1059,26 @@ export function holdTransaction(
   actor: UserSummary
 ): Transaction {
   const db = getDb();
+  const shiftCfg = db
+    .prepare('SELECT require_open_shift_for_sales FROM shift_settings WHERE id = 1')
+    .get() as { require_open_shift_for_sales: number } | undefined;
+  if ((shiftCfg?.require_open_shift_for_sales ?? 1) === 1) {
+    const activeStoreSession = db
+      .prepare(`
+        SELECT id FROM cashier_shifts
+        WHERE status = 'OPEN'
+        ORDER BY opened_at DESC, rowid DESC
+        LIMIT 1
+      `)
+      .get() as { id: string } | undefined;
+    if (!activeStoreSession) {
+      throw new ServiceError(
+        409,
+        'Toko belum dibuka. Silakan lakukan Buka Toko terlebih dahulu sebelum membuat atau menahan transaksi.',
+        'SHIFT_REQUIRED'
+      );
+    }
+  }
   const settingsRow = db
     .prepare(`
       SELECT tax_enabled, tax_rate, allow_negative_stock,
@@ -1243,10 +1331,10 @@ export function cancelTransaction(
 ): Transaction {
   const db = getDb();
   const current = getTransactionById(id);
-  if (current.status === 'COMPLETED') {
+  if (current.status === 'COMPLETED' || current.status === 'VOIDED') {
     throw new ServiceError(
       409,
-      'Transaksi yang sudah selesai (COMPLETED) tidak dapat dibatalkan atau dihapus.'
+      'Transaksi yang sudah selesai (COMPLETED) atau di-void (VOIDED) tidak dapat dibatalkan atau dihapus.'
     );
   }
   if (current.status === 'CANCELLED') {
@@ -1294,6 +1382,7 @@ export interface PaymentLineInput {
 
 export interface CheckoutInput extends CartCalculationInput {
   heldTransactionId?: unknown;
+  shiftId?: unknown;
   customerId?: unknown;
   notes?: unknown;
   paymentMethod?: unknown; // single payment method name (legacy + quick)
@@ -1594,6 +1683,44 @@ export function executeTransactionalCheckout(
   const pointsEarned = customerId ? calc.preview.estimatedPointsEarned : 0;
   const pointsRedeemed = customerId ? calc.preview.loyaltyPointsRedeemed : 0;
 
+  // Resolve active store session & enforce store opening policy when configured
+  const shiftCfg = db
+    .prepare('SELECT require_open_shift_for_sales FROM shift_settings WHERE id = 1')
+    .get() as { require_open_shift_for_sales: number } | undefined;
+  const requireOpenShift = (shiftCfg?.require_open_shift_for_sales ?? 1) === 1;
+
+  let resolvedShiftId: string | null = null;
+  if (typeof input.shiftId === 'string' && input.shiftId.trim()) {
+    const requestedShift = db
+      .prepare('SELECT id, status FROM cashier_shifts WHERE id = ?')
+      .get(input.shiftId.trim()) as { id: string; status: string } | undefined;
+    if (!requestedShift) {
+      throw new ServiceError(404, 'Sesi buka toko yang dipilih tidak ditemukan.');
+    }
+    if (requestedShift.status !== 'OPEN') {
+      throw new ServiceError(409, 'Toko sudah ditutup dan tidak dapat menerima transaksi baru.');
+    }
+    resolvedShiftId = requestedShift.id;
+  } else {
+    const activeShift = db
+      .prepare(`
+        SELECT id FROM cashier_shifts
+        WHERE status = 'OPEN'
+        ORDER BY opened_at DESC, rowid DESC
+        LIMIT 1
+      `)
+      .get() as { id: string } | undefined;
+    resolvedShiftId = activeShift?.id ?? null;
+  }
+
+  if (requireOpenShift && !resolvedShiftId) {
+    throw new ServiceError(
+      409,
+      'Toko belum dibuka. Silakan lakukan Buka Toko terlebih dahulu sebelum memproses transaksi.',
+      'SHIFT_REQUIRED'
+    );
+  }
+
   // 8-14. Execute atomic DB transaction
   db.exec('BEGIN IMMEDIATE;');
   try {
@@ -1628,7 +1755,7 @@ export function executeTransactionalCheckout(
             discount_amount = ?, apply_tax = ?, tax_amount = ?, total = ?,
             cash_received = ?, change_amount = ?, payment_method = ?,
             total_cost = ?, gross_profit = ?, notes = ?, idempotency_key = ?,
-            cashier_id = ?, cashier_name = ?, completed_at = ?, updated_at = ?
+            shift_id = ?, cashier_id = ?, cashier_name = ?, completed_at = ?, updated_at = ?
         WHERE id = ?
       `).run(
         invoiceNumber,
@@ -1656,6 +1783,7 @@ export function executeTransactionalCheckout(
         calc.grossProfit,
         notes,
         idempotencyKey,
+        resolvedShiftId,
         actor?.id ?? null,
         cashierName,
         nowIso,
@@ -1674,9 +1802,9 @@ export function executeTransactionalCheckout(
           loyalty_points_earned, loyalty_points_redeemed, loyalty_discount_amount, applied_promotions_json,
           discount_amount, apply_tax, tax_amount, total,
           cash_received, change_amount, payment_method, total_cost, gross_profit,
-          notes, idempotency_key, cashier_id, cashier_name,
+          notes, idempotency_key, shift_id, cashier_id, cashier_name,
           held_at, cancelled_at, completed_at, created_at, updated_at
-        ) VALUES (?, ?, 'COMPLETED', 'PAID', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)
+        ) VALUES (?, ?, 'COMPLETED', 'PAID', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)
       `).run(
         trxId,
         invoiceNumber,
@@ -1704,6 +1832,7 @@ export function executeTransactionalCheckout(
         calc.grossProfit,
         notes,
         idempotencyKey,
+        resolvedShiftId,
         actor?.id ?? null,
         cashierName,
         nowIso,

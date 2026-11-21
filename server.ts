@@ -3,6 +3,7 @@ import path from 'path';
 import { getDb } from './server/db/database.ts';
 import {
   authenticateAccessToken,
+  authorizeCartItemCancel,
   changeOwnPassword,
   listSessions,
   loginWithCredentials,
@@ -103,6 +104,31 @@ import {
   resolveStoreLogoPath,
   uploadStoreLogo,
 } from './server/services/receiptService.ts';
+import {
+  createReturnAndRefund,
+  getReturnById,
+  getReturnEligibility,
+  getReturnVoidSummary,
+  listRefundRecords,
+  listReturns,
+  listVoidHistory,
+  previewReturnCalculation,
+  resolveReturnItemDisposition,
+  searchOriginalTransactions,
+  updateRefundRecordStatus,
+  voidCompletedTransaction,
+} from './server/services/returnVoidService.ts';
+import {
+  approveShiftDiscrepancy,
+  closeShift,
+  getActiveShiftForUser,
+  getShiftReport,
+  getShiftSettings,
+  listShifts,
+  openShift,
+  recordCashMovement,
+  updateShiftSettings,
+} from './server/services/shiftService.ts';
 import {
   getRecognitionProviderStatuses,
   getRecognitionSettings,
@@ -1157,6 +1183,28 @@ export function createApp() {
     }
   );
 
+  app.post(
+    '/api/pos/item-cancel/authorize',
+    requireAuth,
+    requireAnyPermission(['pos:view', 'pos:create']),
+    (req: AuthenticatedRequest, res) => {
+      const { pinApprovalToken, productId, productName, qty } = req.body as {
+        pinApprovalToken?: unknown;
+        productId?: unknown;
+        productName?: unknown;
+        qty?: unknown;
+      };
+      const result = authorizeCartItemCancel({
+        actor: req.authUser!,
+        pinApprovalToken,
+        productId,
+        productName,
+        qty,
+      });
+      res.json(result);
+    }
+  );
+
   app.get(
     '/api/transactions',
     requireAuth,
@@ -1232,10 +1280,10 @@ export function createApp() {
 
   app.delete('/api/transactions/:id', requireAuth, (req: AuthenticatedRequest, res) => {
     const existing = getTransactionById(String(req.params.id));
-    if (existing.status === 'COMPLETED') {
+    if (existing.status === 'COMPLETED' || existing.status === 'VOIDED') {
       throw new ServiceError(
         409,
-        'Transaksi yang sudah selesai (COMPLETED) tidak dapat dihapus secara fisik.'
+        'Transaksi yang sudah selesai (COMPLETED) atau di-void (VOIDED) tidak dapat dihapus secara fisik.'
       );
     }
     if (!req.authUser!.permissions.includes('pos:cancel')) {
@@ -1319,6 +1367,273 @@ export function createApp() {
     (req: AuthenticatedRequest, res) => {
       const result = deleteStoreLogo(req.authUser!);
       res.json({ ...result, store: getBootstrapData(req.authUser) });
+    }
+  );
+
+  // --- Phase 10 Shift & Cash Management Routes ---
+  app.get(
+    '/api/shifts/settings',
+    requireAuth,
+    requireAnyPermission(['shifts:view', 'shifts:open', 'shifts:close', 'shifts:manage', 'pos:view', 'settings:edit']),
+    (_req, res) => {
+      res.json({ shiftSettings: getShiftSettings() });
+    }
+  );
+
+  app.put(
+    '/api/shifts/settings',
+    requireAuth,
+    requireAnyPermission(['shifts:manage', 'settings:edit']),
+    (req: AuthenticatedRequest, res) => {
+      const shiftSettings = updateShiftSettings(req.body || {}, req.authUser!);
+      res.json({ shiftSettings, store: getBootstrapData(req.authUser) });
+    }
+  );
+
+  app.get(
+    '/api/shifts/current',
+    requireAuth,
+    requireAnyPermission(['shifts:view', 'shifts:open', 'shifts:close', 'shifts:cash_movement', 'pos:view']),
+    (req: AuthenticatedRequest, res) => {
+      const shift = getActiveShiftForUser(req.authUser!.id);
+      const report = shift ? getShiftReport(shift.id, req.authUser!) : null;
+      res.json({ currentShift: shift, report, shiftSettings: getShiftSettings() });
+    }
+  );
+
+  app.post(
+    '/api/shifts/open',
+    requireAuth,
+    requirePermission('shifts:open'),
+    (req: AuthenticatedRequest, res) => {
+      const shift = openShift(req.body || {}, req.authUser!);
+      res.status(201).json({ shift, store: getBootstrapData(req.authUser) });
+    }
+  );
+
+  app.get(
+    '/api/shifts',
+    requireAuth,
+    requireAnyPermission(['shifts:view', 'shifts:open', 'shifts:close', 'shifts:cash_movement', 'shifts:approve', 'shifts:manage', 'reports:view']),
+    (req: AuthenticatedRequest, res) => {
+      const q = req.query as Record<string, string | undefined>;
+      const result = listShifts(
+        {
+          search: q.search,
+          status: q.status,
+          discrepancyStatus: q.discrepancyStatus,
+          cashierUserId: q.cashierUserId,
+          dateFrom: q.dateFrom,
+          dateTo: q.dateTo,
+          page: q.page ? Number(q.page) : 1,
+          pageSize: q.pageSize ? Number(q.pageSize) : 25,
+        },
+        req.authUser!
+      );
+      res.json(result);
+    }
+  );
+
+  app.get(
+    '/api/shifts/:id',
+    requireAuth,
+    requireAnyPermission(['shifts:view', 'shifts:open', 'shifts:close', 'shifts:cash_movement', 'shifts:approve', 'shifts:manage', 'reports:view']),
+    (req: AuthenticatedRequest, res) => {
+      const report = getShiftReport(String(req.params.id), req.authUser!);
+      res.json({ report });
+    }
+  );
+
+  app.post(
+    '/api/shifts/:id/cash-movements',
+    requireAuth,
+    requirePermission('shifts:cash_movement'),
+    (req: AuthenticatedRequest, res) => {
+      const result = recordCashMovement(String(req.params.id), req.body || {}, req.authUser!);
+      res.status(201).json({ ...result, store: getBootstrapData(req.authUser) });
+    }
+  );
+
+  app.post(
+    '/api/shifts/:id/close',
+    requireAuth,
+    requirePermission('shifts:close'),
+    (req: AuthenticatedRequest, res) => {
+      const report = closeShift(String(req.params.id), req.body || {}, req.authUser!);
+      res.json({ report, store: getBootstrapData(req.authUser) });
+    }
+  );
+
+  app.post(
+    '/api/shifts/:id/approve',
+    requireAuth,
+    requirePermission('shifts:approve'),
+    (req: AuthenticatedRequest, res) => {
+      const report = approveShiftDiscrepancy(String(req.params.id), req.body || {}, req.authUser!);
+      res.json({ report, store: getBootstrapData(req.authUser) });
+    }
+  );
+
+  // --- Phase 11 Return, Refund & Void Routes ---
+  app.get(
+    '/api/returns-voids/summary',
+    requireAuth,
+    requireAnyPermission(['transactions:view', 'pos:view', 'pos:refund', 'pos:void', 'reports:view']),
+    (_req, res) => {
+      res.json({ summary: getReturnVoidSummary() });
+    }
+  );
+
+  app.get(
+    '/api/returns-voids/search',
+    requireAuth,
+    requireAnyPermission(['transactions:view', 'pos:view', 'pos:refund', 'pos:void']),
+    (req, res) => {
+      const q = req.query as { search?: string; limit?: string };
+      const results = searchOriginalTransactions({
+        search: q.search,
+        limit: q.limit ? Number(q.limit) : 40,
+      });
+      res.json({ results });
+    }
+  );
+
+  app.get(
+    '/api/transactions/:id/return-eligibility',
+    requireAuth,
+    requireAnyPermission(['transactions:view', 'pos:view', 'pos:refund', 'pos:void']),
+    (req, res) => {
+      const eligibility = getReturnEligibility(String(req.params.id));
+      res.json({ eligibility });
+    }
+  );
+
+  app.post(
+    '/api/transactions/:id/returns/preview',
+    requireAuth,
+    requireAnyPermission(['transactions:view', 'pos:view', 'pos:refund']),
+    (req, res) => {
+      const preview = previewReturnCalculation(String(req.params.id), req.body || {});
+      res.json({ preview });
+    }
+  );
+
+  app.post(
+    '/api/transactions/:id/returns',
+    requireAuth,
+    requireAnyPermission(['pos:view', 'transactions:view', 'pos:refund']),
+    (req: AuthenticatedRequest, res) => {
+      const result = createReturnAndRefund(String(req.params.id), req.body || {}, req.authUser!);
+      res.status(result.idempotentReplay ? 200 : 201).json({
+        ...result,
+        store: getBootstrapData(req.authUser),
+      });
+    }
+  );
+
+  app.get(
+    '/api/returns',
+    requireAuth,
+    requireAnyPermission(['transactions:view', 'pos:view', 'pos:refund', 'stock:view', 'reports:view']),
+    (req, res) => {
+      const q = req.query as {
+        search?: string;
+        status?: string;
+        disposition?: string;
+        limit?: string;
+      };
+      const returns = listReturns({
+        search: q.search,
+        status: q.status,
+        disposition: q.disposition,
+        limit: q.limit ? Number(q.limit) : 200,
+      });
+      res.json({ returns });
+    }
+  );
+
+  app.get(
+    '/api/returns/:id',
+    requireAuth,
+    requireAnyPermission(['transactions:view', 'pos:view', 'pos:refund', 'stock:view']),
+    (req, res) => {
+      const returnRecord = getReturnById(String(req.params.id));
+      res.json({ returnRecord });
+    }
+  );
+
+  app.post(
+    '/api/returns/items/:itemId/resolve-inspection',
+    requireAuth,
+    requireAnyPermission(['pos:view', 'transactions:view', 'pos:refund', 'stock:adjust', 'stock:view']),
+    (req: AuthenticatedRequest, res) => {
+      const result = resolveReturnItemDisposition(
+        String(req.params.itemId),
+        req.body || {},
+        req.authUser!
+      );
+      res.json({ ...result, store: getBootstrapData(req.authUser) });
+    }
+  );
+
+  app.post(
+    '/api/transactions/:id/void',
+    requireAuth,
+    requireAnyPermission(['pos:view', 'transactions:view', 'pos:void']),
+    (req: AuthenticatedRequest, res) => {
+      const result = voidCompletedTransaction(String(req.params.id), req.body || {}, req.authUser!);
+      res.json({ ...result, store: getBootstrapData(req.authUser) });
+    }
+  );
+
+  app.get(
+    '/api/voids',
+    requireAuth,
+    requireAnyPermission(['transactions:view', 'pos:view', 'pos:refund', 'pos:void', 'reports:view', 'audit:view']),
+    (req, res) => {
+      const q = req.query as { search?: string; limit?: string };
+      const voids = listVoidHistory({
+        search: q.search,
+        limit: q.limit ? Number(q.limit) : 200,
+      });
+      res.json({ voids });
+    }
+  );
+
+  app.get(
+    '/api/refunds',
+    requireAuth,
+    requireAnyPermission(['transactions:view', 'pos:view', 'pos:refund', 'pos:void', 'reports:view']),
+    (req, res) => {
+      const q = req.query as {
+        search?: string;
+        status?: string;
+        paymentType?: string;
+        sourceType?: string;
+        limit?: string;
+      };
+      const refunds = listRefundRecords({
+        search: q.search,
+        status: q.status,
+        paymentType: q.paymentType,
+        sourceType: q.sourceType,
+        limit: q.limit ? Number(q.limit) : 200,
+      });
+      res.json({ refunds });
+    }
+  );
+
+  app.patch(
+    '/api/refunds/:id/status',
+    requireAuth,
+    requirePermission('pos:refund'),
+    (req: AuthenticatedRequest, res) => {
+      const refundRecord = updateRefundRecordStatus(
+        String(req.params.id),
+        req.body || {},
+        req.authUser!
+      );
+      res.json({ refundRecord, store: getBootstrapData(req.authUser) });
     }
   );
 

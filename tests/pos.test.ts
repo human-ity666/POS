@@ -966,11 +966,23 @@ describe('Phase 04 POS Core & Checkout Flow', () => {
     });
     assert.equal(hold2.status, 201);
 
-    const cancel2 = await api<{ transaction: { status: string; paymentStatus: string } }>(
+    // Cashier CANNOT cancel/delete held transactions (403 Forbidden)
+    const cashierCancel = await api<{ error: string }>(
       `/api/transactions/${hold2.body.transaction.id}/cancel`,
       {
         method: 'POST',
         token: cashierToken,
+        body: JSON.stringify({ reason: 'Pembeli batal beli' }),
+      }
+    );
+    assert.equal(cashierCancel.status, 403);
+
+    // Admin/Supervisor CAN cancel held transactions cleanly
+    const cancel2 = await api<{ transaction: { status: string; paymentStatus: string } }>(
+      `/api/transactions/${hold2.body.transaction.id}/cancel`,
+      {
+        method: 'POST',
+        token: adminToken,
         body: JSON.stringify({ reason: 'Pembeli batal beli' }),
       }
     );
@@ -2766,5 +2778,1545 @@ describe('Phase 09 — Customer Management, Loyalty Points & Promotion Engine', 
     assert.equal(denyLoyaltyCfg.status, 403);
   });
 });
+
+describe('Feature Updates, Bug Fixes & Cart Item Cancel Matrix', () => {
+  let fuAdminToken = '';
+  let fuSupervisorToken = '';
+  let fuCashierToken = '';
+  let fuProdId = '';
+  let fuCustomerId = '';
+
+  before(async () => {
+    const adminRes = await api<{ accessToken: string }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier: 'admin', password: 'Admin123!' }),
+    });
+    assert.equal(adminRes.status, 200);
+    fuAdminToken = adminRes.body.accessToken;
+
+    const spvRes = await api<{ accessToken: string }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier: 'supervisor', password: 'Super123!' }),
+    });
+    assert.equal(spvRes.status, 200);
+    fuSupervisorToken = spvRes.body.accessToken;
+
+    const cashierRes = await api<{ accessToken: string }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier: 'kasir', password: 'Kasir123!' }),
+    });
+    assert.equal(cashierRes.status, 200);
+    fuCashierToken = cashierRes.body.accessToken;
+
+    const prodRes = await api<{ product: { id: string } }>('/api/products', {
+      method: 'POST',
+      token: fuAdminToken,
+      body: JSON.stringify({
+        sku: `FU-${Date.now().toString().slice(-6)}`,
+        barcode: `899999${Date.now().toString().slice(-7)}`,
+        name: 'Produk Uji Harga Bebas Modal',
+        category: 'Minuman',
+        unit: 'BOTTLE',
+        costPrice: 1257,
+        sellPrice: 1257,
+        stock: 50,
+        minStock: 5,
+        taxCategory: 'EXEMPT',
+      }),
+    });
+    assert.equal(prodRes.status, 201);
+    fuProdId = prodRes.body.product.id;
+
+    const custRes = await api<{ customer: { id: string } }>('/api/customers', {
+      method: 'POST',
+      token: fuCashierToken,
+      body: JSON.stringify({
+        name: 'Member Uji Loyalitas',
+        phone: `0819${Date.now().toString().slice(-8)}`,
+        email: 'uji.loyal@kassaritel.id',
+        address: 'Jl. Uji No. 1',
+      }),
+    });
+    assert.equal(custRes.status, 201);
+    fuCustomerId = custRes.body.customer.id;
+
+    await api(`/api/customers/${fuCustomerId}/loyalty/adjust`, {
+      method: 'POST',
+      token: fuAdminToken,
+      body: JSON.stringify({ pointsDelta: 50, notes: 'Saldo awal uji redeem' }),
+    });
+  });
+
+  it('enforces sellPrice >= costPrice and specialPrice >= costPrice while allowing any non-negative costPrice', async () => {
+    // Reject sellPrice < costPrice
+    const badSell = await api<{ error: string }>('/api/products', {
+      method: 'POST',
+      token: fuAdminToken,
+      body: JSON.stringify({
+        sku: `BADSELL-${Date.now().toString().slice(-5)}`,
+        barcode: `899888${Date.now().toString().slice(-7)}`,
+        name: 'Harga Jual Kurang dari Modal',
+        category: 'Minuman',
+        unit: 'PCS',
+        costPrice: 5000,
+        sellPrice: 4999,
+        stock: 10,
+        minStock: 1,
+        taxCategory: 'EXEMPT',
+      }),
+    });
+    assert.equal(badSell.status, 400);
+
+    // Reject specialPrice < costPrice when specialPrice > 0
+    const badSpecial = await api<{ error: string }>(`/api/products/${fuProdId}`, {
+      method: 'PUT',
+      token: fuAdminToken,
+      body: JSON.stringify({
+        costPrice: 2345,
+        sellPrice: 3000,
+        specialPrice: 2000,
+      }),
+    });
+    assert.equal(badSpecial.status, 400);
+
+    // Allow arbitrary non-round costPrice (e.g. 2345) with sellPrice === costPrice & specialPrice === costPrice
+    const validUpdate = await api<{ product: { costPrice: number; sellPrice: number; specialPrice: number | null } }>(
+      `/api/products/${fuProdId}`,
+      {
+        method: 'PUT',
+        token: fuAdminToken,
+        body: JSON.stringify({
+          costPrice: 2345,
+          sellPrice: 2345,
+          specialPrice: 2345,
+        }),
+      }
+    );
+    assert.equal(validUpdate.status, 200);
+    assert.equal(validUpdate.body.product.costPrice, 2345);
+    assert.equal(validUpdate.body.product.sellPrice, 2345);
+
+    // Restore clean round sellPrice 10000 for loyalty earn test
+    const restorePrice = await api(`/api/products/${fuProdId}`, {
+      method: 'PUT',
+      token: fuAdminToken,
+      body: JSON.stringify({
+        costPrice: 6500,
+        sellPrice: 10000,
+        specialPrice: null,
+      }),
+    });
+    assert.equal(restorePrice.status, 200);
+  });
+
+  it('restricts Hold deletion/cancellation strictly to Supervisor and Admin (Cashier gets 403)', async () => {
+    const heldA = await api<{ transaction: { id: string } }>('/api/transactions/hold', {
+      method: 'POST',
+      token: fuCashierToken,
+      body: JSON.stringify({
+        items: [{ productId: fuProdId, qty: 1 }],
+        applyTax: false,
+      }),
+    });
+    assert.equal(heldA.status, 201);
+
+    const cashierCancel = await api<{ error: string }>(
+      `/api/transactions/${heldA.body.transaction.id}/cancel`,
+      {
+        method: 'POST',
+        token: fuCashierToken,
+        body: JSON.stringify({ reason: 'Kasir coba hapus' }),
+      }
+    );
+    assert.equal(cashierCancel.status, 403);
+
+    const cashierDelete = await api<{ error: string }>(
+      `/api/transactions/${heldA.body.transaction.id}`,
+      {
+        method: 'DELETE',
+        token: fuCashierToken,
+      }
+    );
+    assert.equal(cashierDelete.status, 403);
+
+    const spvCancel = await api<{ transaction: { status: string } }>(
+      `/api/transactions/${heldA.body.transaction.id}/cancel`,
+      {
+        method: 'POST',
+        token: fuSupervisorToken,
+        body: JSON.stringify({ reason: 'Dibatalkan Supervisor' }),
+      }
+    );
+    assert.equal(spvCancel.status, 200);
+    assert.equal(spvCancel.body.transaction.status, 'CANCELLED');
+
+    const heldB = await api<{ transaction: { id: string } }>('/api/transactions/hold', {
+      method: 'POST',
+      token: fuCashierToken,
+      body: JSON.stringify({
+        items: [{ productId: fuProdId, qty: 1 }],
+        applyTax: false,
+      }),
+    });
+    assert.equal(heldB.status, 201);
+
+    const adminDelete = await api<{ transaction: { status: string } }>(
+      `/api/transactions/${heldB.body.transaction.id}`,
+      {
+        method: 'DELETE',
+        token: fuAdminToken,
+      }
+    );
+    assert.equal(adminDelete.status, 200);
+    assert.equal(adminDelete.body.transaction.status, 'CANCELLED');
+  });
+
+  it('toggles loyalty disableEarnOnRedeem ON vs OFF when member redeems points', async () => {
+    // 1. Set disableEarnOnRedeem: true (ON) -> redeeming points earns 0 new points
+    const onCfg = await api<{ loyaltySettings: { disableEarnOnRedeem: boolean } }>(
+      '/api/loyalty/settings',
+      {
+        method: 'PUT',
+        token: fuAdminToken,
+        body: JSON.stringify({
+          enabled: true,
+          pointsPerAmount: 10000,
+          pointValueRp: 100,
+          minRedeemPoints: 10,
+          maxRedeemPercent: 50,
+          disableEarnOnRedeem: true,
+        }),
+      }
+    );
+    assert.equal(onCfg.status, 200);
+    assert.equal(onCfg.body.loyaltySettings.disableEarnOnRedeem, true);
+
+    // Subtotal 5 x 10.000 = 50.000; redeem 10 points (-1.000) -> net 49.000 -> normally 4 points, suppressed to 0
+    const trxWithOn = await api<{
+      transaction: { total: number; loyaltyPointsRedeemed: number; loyaltyPointsEarned: number };
+    }>('/api/transactions', {
+      method: 'POST',
+      token: fuCashierToken,
+      body: JSON.stringify({
+        customerId: fuCustomerId,
+        items: [{ productId: fuProdId, qty: 5 }],
+        loyaltyPointsToRedeem: 10,
+        applyTax: false,
+        paymentMethod: 'Tunai',
+        cashReceived: 50000,
+      }),
+    });
+    assert.equal(trxWithOn.status, 201);
+    assert.equal(trxWithOn.body.transaction.loyaltyPointsRedeemed, 10);
+    assert.equal(trxWithOn.body.transaction.loyaltyPointsEarned, 0);
+
+    // 2. Set disableEarnOnRedeem: false (OFF) -> redeeming points STILL earns points on remaining spend
+    const offCfg = await api<{ loyaltySettings: { disableEarnOnRedeem: boolean } }>(
+      '/api/loyalty/settings',
+      {
+        method: 'PUT',
+        token: fuAdminToken,
+        body: JSON.stringify({
+          enabled: true,
+          pointsPerAmount: 10000,
+          pointValueRp: 100,
+          minRedeemPoints: 10,
+          maxRedeemPercent: 50,
+          disableEarnOnRedeem: false,
+        }),
+      }
+    );
+    assert.equal(offCfg.status, 200);
+    assert.equal(offCfg.body.loyaltySettings.disableEarnOnRedeem, false);
+
+    const trxWithOff = await api<{
+      transaction: { total: number; loyaltyPointsRedeemed: number; loyaltyPointsEarned: number };
+    }>('/api/transactions', {
+      method: 'POST',
+      token: fuCashierToken,
+      body: JSON.stringify({
+        customerId: fuCustomerId,
+        items: [{ productId: fuProdId, qty: 5 }],
+        loyaltyPointsToRedeem: 10,
+        applyTax: false,
+        paymentMethod: 'Tunai',
+        cashReceived: 50000,
+      }),
+    });
+    assert.equal(trxWithOff.status, 201);
+    assert.equal(trxWithOff.body.transaction.loyaltyPointsRedeemed, 10);
+    assert.equal(trxWithOff.body.transaction.total, 49000);
+    assert.equal(trxWithOff.body.transaction.loyaltyPointsEarned, 4);
+  });
+
+  it('provides Batalkan Item (pos:item_cancel) in role matrix and enforces permission or single-use PIN authorization', async () => {
+    // 1. Verify pos:item_cancel appears under POS & Kasir in /api/permissions
+    const permRes = await api<{
+      permissions: Array<{ id: string; code: string; module: string; label: string }>;
+    }>('/api/permissions', { token: fuAdminToken });
+    assert.equal(permRes.status, 200);
+    const cancelItemPerm = permRes.body.permissions.find((p) => p.code === 'pos:item_cancel');
+    assert.ok(cancelItemPerm);
+    assert.equal(cancelItemPerm.module, 'POS & Kasir');
+    assert.equal(cancelItemPerm.label, 'Batalkan Item');
+
+    // 2. Cashier defaults to NOT having pos:item_cancel -> 403 ITEM_CANCEL_PIN_REQUIRED without PIN
+    const denyNoPin = await api<{ code: string }>('/api/pos/item-cancel/authorize', {
+      method: 'POST',
+      token: fuCashierToken,
+      body: JSON.stringify({ productId: fuProdId, productName: 'Item Uji', qty: 1 }),
+    });
+    assert.equal(denyNoPin.status, 403);
+    assert.equal(denyNoPin.body.code, 'ITEM_CANCEL_PIN_REQUIRED');
+
+    // 3. Supervisor PIN verification for action: 'item_cancel' authorizes once and blocks replay
+    const spvPin = await api<{ pinApprovalToken: string }>('/api/auth/verify-pin', {
+      method: 'POST',
+      token: fuCashierToken,
+      body: JSON.stringify({
+        authorizerIdentifier: 'supervisor',
+        pin: '654321',
+        action: 'item_cancel',
+        reason: 'Pembeli tukar varian produk',
+      }),
+    });
+    assert.equal(spvPin.status, 200);
+    assert.ok(spvPin.body.pinApprovalToken);
+
+    const okWithPin = await api<{ authorized: boolean; method: string }>('/api/pos/item-cancel/authorize', {
+      method: 'POST',
+      token: fuCashierToken,
+      body: JSON.stringify({
+        pinApprovalToken: spvPin.body.pinApprovalToken,
+        productId: fuProdId,
+        productName: 'Item Uji',
+        qty: 1,
+      }),
+    });
+    assert.equal(okWithPin.status, 200);
+    assert.equal(okWithPin.body.authorized, true);
+    assert.equal(okWithPin.body.method, 'PIN');
+
+    // Replay of same single-use token must fail
+    const replayPin = await api<{ error: string }>('/api/pos/item-cancel/authorize', {
+      method: 'POST',
+      token: fuCashierToken,
+      body: JSON.stringify({
+        pinApprovalToken: spvPin.body.pinApprovalToken,
+        productId: fuProdId,
+        productName: 'Item Uji',
+        qty: 1,
+      }),
+    });
+    assert.equal(replayPin.status, 403);
+
+    // 4. Supervisor has pos:item_cancel natively without needing a PIN
+    const spvDirect = await api<{ authorized: boolean; method: string }>('/api/pos/item-cancel/authorize', {
+      method: 'POST',
+      token: fuSupervisorToken,
+      body: JSON.stringify({ productId: fuProdId, productName: 'Item Uji', qty: 1 }),
+    });
+    assert.equal(spvDirect.status, 200);
+    assert.equal(spvDirect.body.authorized, true);
+    assert.equal(spvDirect.body.method, 'PERMISSION');
+
+    // 5. Granting pos:item_cancel to role-cashier via Daftar Role matrix lets Cashier cancel without PIN, then restore
+    const rolesRes = await api<{
+      roles: Array<{ id: string; permissionCodes: string[] }>;
+    }>('/api/roles', { token: fuAdminToken });
+    assert.equal(rolesRes.status, 200);
+    const cashierRole = rolesRes.body.roles.find((r) => r.id === 'role-cashier');
+    assert.ok(cashierRole);
+    const originalPermCodes = cashierRole.permissionCodes;
+    assert.ok(!originalPermCodes.includes('pos:item_cancel'));
+
+    const grantRes = await api('/api/roles/role-cashier/permissions', {
+      method: 'PUT',
+      token: fuAdminToken,
+      body: JSON.stringify({ permissionCodes: [...originalPermCodes, 'pos:item_cancel'] }),
+    });
+    assert.equal(grantRes.status, 200);
+
+    const cashierDirect = await api<{ authorized: boolean; method: string }>(
+      '/api/pos/item-cancel/authorize',
+      {
+        method: 'POST',
+        token: fuCashierToken,
+        body: JSON.stringify({ productId: fuProdId, productName: 'Item Uji', qty: 1 }),
+      }
+    );
+    assert.equal(cashierDirect.status, 200);
+    assert.equal(cashierDirect.body.method, 'PERMISSION');
+
+    // Restore Cashier role matrix back to original permissions
+    const restoreRole = await api('/api/roles/role-cashier/permissions', {
+      method: 'PUT',
+      token: fuAdminToken,
+      body: JSON.stringify({ permissionCodes: originalPermCodes }),
+    });
+    assert.equal(restoreRole.status, 200);
+  });
+});
+
+describe('Phase 10 — Shift & Cash Management', () => {
+  let p10AdminToken = '';
+  let p10SupervisorToken = '';
+  let p10CashierToken = '';
+  let p10ProdId = '';
+  let p10Prod2Id = '';
+
+  before(async () => {
+    const adminRes = await api<{ accessToken: string }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier: 'admin', password: 'Admin123!' }),
+    });
+    assert.equal(adminRes.status, 200);
+    p10AdminToken = adminRes.body.accessToken;
+
+    const spvRes = await api<{ accessToken: string }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier: 'supervisor', password: 'Super123!' }),
+    });
+    assert.equal(spvRes.status, 200);
+    p10SupervisorToken = spvRes.body.accessToken;
+
+    const cashierRes = await api<{ accessToken: string }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier: 'kasir', password: 'Kasir123!' }),
+    });
+    assert.equal(cashierRes.status, 200);
+    p10CashierToken = cashierRes.body.accessToken;
+
+    const p1 = await api<{ product: { id: string } }>('/api/products', {
+      method: 'POST',
+      token: p10AdminToken,
+      body: JSON.stringify({
+        sku: 'SKU-P10-A',
+        barcode: '8998888100011',
+        name: 'Produk Uji Shift Kopi 200g',
+        category: 'Minuman',
+        unit: 'PCS',
+        costPrice: 12000,
+        sellPrice: 20000,
+        stock: 50,
+        minStock: 5,
+      }),
+    });
+    assert.equal(p1.status, 201);
+    p10ProdId = p1.body.product.id;
+
+    const p2 = await api<{ product: { id: string } }>('/api/products', {
+      method: 'POST',
+      token: p10AdminToken,
+      body: JSON.stringify({
+        sku: 'SKU-P10-B',
+        barcode: '8998888100028',
+        name: 'Produk Uji Shift Biskuit',
+        category: 'Makanan',
+        unit: 'PACK',
+        costPrice: 8000,
+        sellPrice: 15000,
+        stock: 50,
+        minStock: 5,
+      }),
+    });
+    assert.equal(p2.status, 201);
+    p10Prod2Id = p2.body.product.id;
+  });
+
+  it('registers Shift & Kas permissions in RBAC and prevents duplicate active shifts per cashier', async () => {
+    const permsRes = await api<{
+      permissions: Array<{ code: string; module: string }>;
+    }>('/api/permissions', { token: p10AdminToken });
+    assert.equal(permsRes.status, 200);
+    const shiftPerms = permsRes.body.permissions.filter((p) => p.module === 'Shift & Kas');
+    assert.ok(shiftPerms.some((p) => p.code === 'shifts:view'));
+    assert.ok(shiftPerms.some((p) => p.code === 'shifts:open'));
+    assert.ok(shiftPerms.some((p) => p.code === 'shifts:cash_movement'));
+    assert.ok(shiftPerms.some((p) => p.code === 'shifts:approve'));
+    assert.ok(shiftPerms.some((p) => p.code === 'shifts:manage'));
+
+    // Close any lingering open shift for cashier first just in case
+    const curCheck = await api<{ currentShift: { id: string } | null }>('/api/shifts/current', {
+      token: p10CashierToken,
+    });
+    assert.equal(curCheck.status, 200);
+    if (curCheck.body.currentShift) {
+      await api(`/api/shifts/${curCheck.body.currentShift.id}/close`, {
+        method: 'POST',
+        token: p10CashierToken,
+        body: JSON.stringify({
+          actualCash: curCheck.body.currentShift.id ? 0 : 0,
+          confirmed: true,
+        }),
+      });
+    }
+
+    // Cashier opens shift with Rp 200.000
+    const open1 = await api<{
+      shift: {
+        id: string;
+        shiftNumber: string;
+        status: string;
+        openingCash: number;
+        expectedCash: number;
+        registerName: string;
+      };
+    }>('/api/shifts/open', {
+      method: 'POST',
+      token: p10CashierToken,
+      body: JSON.stringify({
+        openingCash: 200000,
+        registerName: 'Kasir Pagi 1',
+        openingNotes: 'Modal pecahan kecil',
+      }),
+    });
+    assert.equal(open1.status, 201);
+    assert.ok(open1.body.shift.shiftNumber.startsWith('SHF-'));
+    assert.equal(open1.body.shift.status, 'OPEN');
+    assert.equal(open1.body.shift.openingCash, 200000);
+    assert.equal(open1.body.shift.expectedCash, 200000);
+
+    // Duplicate open shift by same cashier is rejected (409 SHIFT_ALREADY_OPEN)
+    const dupOpen = await api<{ code: string }>('/api/shifts/open', {
+      method: 'POST',
+      token: p10CashierToken,
+      body: JSON.stringify({ openingCash: 100000 }),
+    });
+    assert.equal(dupOpen.status, 409);
+    assert.equal(dupOpen.body.code, 'SHIFT_ALREADY_OPEN');
+  });
+
+  it('tracks cash movements, split-payment sales, and accurate BigInt cash reconciliation on shift close', async () => {
+    const curRes = await api<{ currentShift: { id: string; expectedCash: number } | null }>(
+      '/api/shifts/current',
+      { token: p10CashierToken }
+    );
+    assert.equal(curRes.status, 200);
+    assert.ok(curRes.body.currentShift);
+    const shiftId = curRes.body.currentShift.id;
+
+    // Cash In +100.000
+    const cmIn = await api<{
+      movement: { movementNumber: string; type: string; amount: number };
+      shift: { cashInTotal: number; expectedCash: number };
+    }>(`/api/shifts/${shiftId}/cash-movements`, {
+      method: 'POST',
+      token: p10CashierToken,
+      body: JSON.stringify({
+        type: 'CASH_IN',
+        amount: 100000,
+        reason: 'Tambah uang kembalian',
+        referenceNumber: 'KAS-01',
+      }),
+    });
+    assert.equal(cmIn.status, 201);
+    assert.ok(cmIn.body.movement.movementNumber.startsWith('CM-'));
+    assert.equal(cmIn.body.shift.cashInTotal, 100000);
+    assert.equal(cmIn.body.shift.expectedCash, 300000);
+
+    // Expense -25.000
+    const cmExp = await api<{ shift: { expenseTotal: number; expectedCash: number } }>(
+      `/api/shifts/${shiftId}/cash-movements`,
+      {
+        method: 'POST',
+        token: p10CashierToken,
+        body: JSON.stringify({
+          type: 'EXPENSE',
+          amount: 25000,
+          reason: 'Beli galon air kasir',
+        }),
+      }
+    );
+    assert.equal(cmExp.status, 201);
+    assert.equal(cmExp.body.shift.expenseTotal, 25000);
+    assert.equal(cmExp.body.shift.expectedCash, 275000);
+
+    // Cash Out -15.000
+    const cmOut = await api<{ shift: { cashOutTotal: number; expectedCash: number } }>(
+      `/api/shifts/${shiftId}/cash-movements`,
+      {
+        method: 'POST',
+        token: p10CashierToken,
+        body: JSON.stringify({
+          type: 'CASH_OUT',
+          amount: 15000,
+          reason: 'Setor awal laci',
+        }),
+      }
+    );
+    assert.equal(cmOut.status, 201);
+    assert.equal(cmOut.body.shift.cashOutTotal, 15000);
+    assert.equal(cmOut.body.shift.expectedCash, 260000);
+
+    // Cash Refund -10.000
+    const cmRef = await api<{ shift: { cashRefunds: number; expectedCash: number } }>(
+      `/api/shifts/${shiftId}/cash-movements`,
+      {
+        method: 'POST',
+        token: p10CashierToken,
+        body: JSON.stringify({
+          type: 'CASH_REFUND',
+          amount: 10000,
+          reason: 'Pengembalian tunai kemasan penyok',
+        }),
+      }
+    );
+    assert.equal(cmRef.status, 201);
+    assert.equal(cmRef.body.shift.cashRefunds, 10000);
+    // Expected so far: 200.000 + 100.000 - 25.000 - 15.000 - 10.000 = 250.000
+    assert.equal(cmRef.body.shift.expectedCash, 250000);
+
+    // Transaction 1: Pure cash sale: 2 x 20.000 = 40.000, tendered 50.000 (change 10.000)
+    const trxCash = await api<{ transaction: { shiftId: string; total: number } }>('/api/transactions', {
+      method: 'POST',
+      token: p10CashierToken,
+      body: JSON.stringify({
+        items: [{ productId: p10ProdId, qty: 2 }],
+        applyTax: false,
+        paymentMethod: 'Tunai',
+        cashReceived: 50000,
+      }),
+    });
+    assert.equal(trxCash.status, 201);
+    assert.equal(trxCash.body.transaction.shiftId, shiftId);
+    assert.equal(trxCash.body.transaction.total, 40000);
+
+    // Transaction 2: Split payment (QRIS 20.000 + Tunai 10.000 applied out of 20.000 tendered = total 30.000)
+    const trxSplit = await api<{ transaction: { shiftId: string; total: number } }>(
+      '/api/transactions',
+      {
+        method: 'POST',
+        token: p10CashierToken,
+        body: JSON.stringify({
+          items: [{ productId: p10Prod2Id, qty: 2 }],
+          applyTax: false,
+          payments: [
+            { paymentMethodName: 'QRIS', amount: 20000, referenceNumber: 'QR-P10-1' },
+            { paymentMethodName: 'Tunai', amount: 10000, tenderedAmount: 20000 },
+          ],
+        }),
+      }
+    );
+    assert.equal(trxSplit.status, 201);
+    assert.equal(trxSplit.body.transaction.shiftId, shiftId);
+    assert.equal(trxSplit.body.transaction.total, 30000);
+
+    // Inspect live shift report:
+    // cashSales = 40.000 + 10.000 = 50.000
+    // cashReceived (tendered) = 50.000 + 20.000 = 70.000; cashChangeGiven = 10.000 + 10.000 = 20.000
+    // nonCashSales = 20.000; totalSales = 70.000; expectedCash = 250.000 + 50.000 = 300.000
+    const liveRpt = await api<{
+      report: {
+        reconciliation: {
+          openingCash: number;
+          cashSales: number;
+          cashReceived: number;
+          cashChangeGiven: number;
+          cashRefunds: number;
+          cashInTotal: number;
+          cashOutTotal: number;
+          expenseTotal: number;
+          nonCashSales: number;
+          totalSales: number;
+          transactionCount: number;
+          expectedCash: number;
+        };
+        paymentBreakdown: Array<{ paymentMethodName: string; amount: number }>;
+        cashMovements: Array<{ type: string }>;
+        transactions: Array<{ id: string }>;
+      };
+    }>(`/api/shifts/${shiftId}`, { token: p10CashierToken });
+    assert.equal(liveRpt.status, 200);
+    const rec = liveRpt.body.report.reconciliation;
+    assert.equal(rec.openingCash, 200000);
+    assert.equal(rec.cashSales, 50000);
+    assert.equal(rec.cashReceived, 70000);
+    assert.equal(rec.cashChangeGiven, 20000);
+    assert.equal(rec.cashRefunds, 10000);
+    assert.equal(rec.cashInTotal, 100000);
+    assert.equal(rec.cashOutTotal, 15000);
+    assert.equal(rec.expenseTotal, 25000);
+    assert.equal(rec.nonCashSales, 20000);
+    assert.equal(rec.totalSales, 70000);
+    assert.equal(rec.transactionCount, 2);
+    assert.equal(rec.expectedCash, 300000);
+    assert.equal(liveRpt.body.report.cashMovements.length, 4);
+    assert.equal(liveRpt.body.report.transactions.length, 2);
+
+    // Closing without confirmation checkbox must fail (400)
+    const noConfirmClose = await api<{ error: string }>(`/api/shifts/${shiftId}/close`, {
+      method: 'POST',
+      token: p10CashierToken,
+      body: JSON.stringify({ actualCash: 300000, confirmed: false }),
+    });
+    assert.equal(noConfirmClose.status, 400);
+
+    // Close shift with exact cash using denominations (2x100k + 2x50k = 300k) -> MATCHED
+    const closedExact = await api<{
+      report: {
+        shift: {
+          status: string;
+          expectedCash: number;
+          actualCash: number;
+          difference: number;
+          discrepancyStatus: string;
+          closingDenominations: Array<{ denomination: number; qty: number; subtotal: number }>;
+        };
+      };
+    }>(`/api/shifts/${shiftId}/close`, {
+      method: 'POST',
+      token: p10CashierToken,
+      body: JSON.stringify({
+        denominations: [
+          { denomination: 100000, qty: 2 },
+          { denomination: 50000, qty: 2 },
+        ],
+        closingNotes: 'Tutup shift pagi pas',
+        confirmed: true,
+      }),
+    });
+    assert.equal(closedExact.status, 200);
+    assert.equal(closedExact.body.report.shift.status, 'CLOSED');
+    assert.equal(closedExact.body.report.shift.expectedCash, 300000);
+    assert.equal(closedExact.body.report.shift.actualCash, 300000);
+    assert.equal(closedExact.body.report.shift.difference, 0);
+    assert.equal(closedExact.body.report.shift.discrepancyStatus, 'MATCHED');
+    assert.equal(closedExact.body.report.shift.closingDenominations.length, 2);
+
+    // Attempting cash movement after shift CLOSED must fail (409)
+    const postCloseMove = await api<{ error: string }>(`/api/shifts/${shiftId}/cash-movements`, {
+      method: 'POST',
+      token: p10CashierToken,
+      body: JSON.stringify({ type: 'CASH_IN', amount: 5000, reason: 'Telat catat' }),
+    });
+    assert.equal(postCloseMove.status, 409);
+  });
+
+  it('handles cash discrepancy approval (post-close Supervisor approval and inline Supervisor PIN), RBAC, and requireOpenShiftForSales', async () => {
+    // 1. Open shift 2 with Rp 100.000, close with Rp 90.000 (short -10.000) -> PENDING_APPROVAL
+    const open2 = await api<{ shift: { id: string } }>('/api/shifts/open', {
+      method: 'POST',
+      token: p10CashierToken,
+      body: JSON.stringify({ openingCash: 100000, registerName: 'Kasir Sore' }),
+    });
+    assert.equal(open2.status, 201);
+    const shift2Id = open2.body.shift.id;
+
+    const close2 = await api<{
+      report: {
+        shift: { status: string; expectedCash: number; actualCash: number; difference: number; discrepancyStatus: string };
+      };
+    }>(`/api/shifts/${shift2Id}/close`, {
+      method: 'POST',
+      token: p10CashierToken,
+      body: JSON.stringify({ actualCash: 90000, closingNotes: 'Selisih minus 10rb', confirmed: true }),
+    });
+    assert.equal(close2.status, 200);
+    assert.equal(close2.body.report.shift.difference, -10000);
+    assert.equal(close2.body.report.shift.discrepancyStatus, 'PENDING_APPROVAL');
+
+    // Cashier cannot approve own discrepancy (403)
+    const cashierApprove = await api<{ error: string }>(`/api/shifts/${shift2Id}/approve`, {
+      method: 'POST',
+      token: p10CashierToken,
+      body: JSON.stringify({ approvalNotes: 'Coba setujui sendiri' }),
+    });
+    assert.equal(cashierApprove.status, 403);
+
+    // Supervisor approves discrepancy -> APPROVED
+    const spvApprove = await api<{
+      report: { shift: { discrepancyStatus: string; approvedByName: string } };
+    }>(`/api/shifts/${shift2Id}/approve`, {
+      method: 'POST',
+      token: p10SupervisorToken,
+      body: JSON.stringify({ approvalNotes: 'Selisih diterima setelah cek laci' }),
+    });
+    assert.equal(spvApprove.status, 200);
+    assert.equal(spvApprove.body.report.shift.discrepancyStatus, 'APPROVED');
+    assert.equal(spvApprove.body.report.shift.approvedByName, 'Siti Rahayu (Supervisor)');
+
+    // 2. Open shift 3 with Rp 50.000, close with Rp 55.000 (+5.000) using Supervisor PIN inline -> immediate APPROVED
+    const open3 = await api<{ shift: { id: string } }>('/api/shifts/open', {
+      method: 'POST',
+      token: p10CashierToken,
+      body: JSON.stringify({ openingCash: 50000, registerName: 'Kasir Malam' }),
+    });
+    assert.equal(open3.status, 201);
+    const shift3Id = open3.body.shift.id;
+
+    const pinRes = await api<{ pinApprovalToken: string }>('/api/auth/verify-pin', {
+      method: 'POST',
+      token: p10CashierToken,
+      body: JSON.stringify({
+        authorizerIdentifier: 'supervisor',
+        pin: '654321',
+        action: 'shift_discrepancy',
+        reason: 'Persetujuan selisih lebih saat tutup shift',
+      }),
+    });
+    assert.equal(pinRes.status, 200);
+
+    const close3 = await api<{
+      report: { shift: { difference: number; discrepancyStatus: string; approvedByName: string } };
+    }>(`/api/shifts/${shift3Id}/close`, {
+      method: 'POST',
+      token: p10CashierToken,
+      body: JSON.stringify({
+        actualCash: 55000,
+        closingNotes: 'Kelebihan Rp 5.000 disetujui langsung',
+        confirmed: true,
+        supervisorPinToken: pinRes.body.pinApprovalToken,
+      }),
+    });
+    assert.equal(close3.status, 200);
+    assert.equal(close3.body.report.shift.difference, 5000);
+    assert.equal(close3.body.report.shift.discrepancyStatus, 'APPROVED');
+    assert.equal(close3.body.report.shift.approvedByName, 'Siti Rahayu (Supervisor)');
+
+    // 3. Supervisor opens own shift, Cashier cannot inspect Supervisor's shift report (403) nor update shift settings (403)
+    const spvOpen = await api<{ shift: { id: string } }>('/api/shifts/open', {
+      method: 'POST',
+      token: p10SupervisorToken,
+      body: JSON.stringify({ openingCash: 75000, registerName: 'Kasir Cadangan' }),
+    });
+    assert.equal(spvOpen.status, 201);
+    const spvShiftId = spvOpen.body.shift.id;
+
+    const cashierPeekSpv = await api<{ error: string }>(`/api/shifts/${spvShiftId}`, {
+      token: p10CashierToken,
+    });
+    assert.equal(cashierPeekSpv.status, 403);
+
+    const spvSetCfgDenied = await api<{ error: string }>('/api/shifts/settings', {
+      method: 'PUT',
+      token: p10SupervisorToken,
+      body: JSON.stringify({ requireOpenShiftForSales: true }),
+    });
+    assert.equal(spvSetCfgDenied.status, 403);
+
+    // Close Supervisor shift cleanly
+    await api(`/api/shifts/${spvShiftId}/close`, {
+      method: 'POST',
+      token: p10SupervisorToken,
+      body: JSON.stringify({ actualCash: 75000, confirmed: true }),
+    });
+
+    // 4. Enable requireOpenShiftForSales -> Cashier sale without open shift gets 409 SHIFT_REQUIRED
+    const adminEnableReq = await api<{
+      shiftSettings: { requireOpenShiftForSales: boolean };
+    }>('/api/shifts/settings', {
+      method: 'PUT',
+      token: p10AdminToken,
+      body: JSON.stringify({
+        requireOpenShiftForSales: true,
+        allowDuplicateOpenShifts: false,
+        requireSupervisorApprovalOnDiscrepancy: true,
+        discrepancyToleranceRp: 0,
+      }),
+    });
+    assert.equal(adminEnableReq.status, 200);
+    assert.equal(adminEnableReq.body.shiftSettings.requireOpenShiftForSales, true);
+
+    const blockedSale = await api<{ code: string }>('/api/transactions', {
+      method: 'POST',
+      token: p10CashierToken,
+      body: JSON.stringify({
+        items: [{ productId: p10ProdId, qty: 1 }],
+        applyTax: false,
+        paymentMethod: 'Tunai',
+        cashReceived: 20000,
+      }),
+    });
+    assert.equal(blockedSale.status, 409);
+    assert.equal(blockedSale.body.code, 'SHIFT_REQUIRED');
+
+    // Open shift -> sale succeeds, then close & restore requireOpenShiftForSales = false
+    const open4 = await api<{ shift: { id: string } }>('/api/shifts/open', {
+      method: 'POST',
+      token: p10CashierToken,
+      body: JSON.stringify({ openingCash: 100000 }),
+    });
+    assert.equal(open4.status, 201);
+
+    const allowedSale = await api<{ transaction: { shiftId: string } }>('/api/transactions', {
+      method: 'POST',
+      token: p10CashierToken,
+      body: JSON.stringify({
+        items: [{ productId: p10ProdId, qty: 1 }],
+        applyTax: false,
+        paymentMethod: 'Tunai',
+        cashReceived: 20000,
+      }),
+    });
+    assert.equal(allowedSale.status, 201);
+    assert.equal(allowedSale.body.transaction.shiftId, open4.body.shift.id);
+
+    await api(`/api/shifts/${open4.body.shift.id}/close`, {
+      method: 'POST',
+      token: p10CashierToken,
+      body: JSON.stringify({ actualCash: 120000, confirmed: true }),
+    });
+
+    const restoreCfg = await api<{ shiftSettings: { requireOpenShiftForSales: boolean } }>(
+      '/api/shifts/settings',
+      {
+        method: 'PUT',
+        token: p10AdminToken,
+        body: JSON.stringify({
+          requireOpenShiftForSales: false,
+          allowDuplicateOpenShifts: false,
+          requireSupervisorApprovalOnDiscrepancy: true,
+          discrepancyToleranceRp: 0,
+        }),
+      }
+    );
+    assert.equal(restoreCfg.status, 200);
+    assert.equal(restoreCfg.body.shiftSettings.requireOpenShiftForSales, false);
+
+    // Check shift audit logs recorded
+    const auditRes = await api<{ auditLogs: Array<{ action: string }> }>('/api/audit-logs', {
+      token: p10AdminToken,
+    });
+    assert.equal(auditRes.status, 200);
+    const actions = new Set(auditRes.body.auditLogs.map((l) => l.action));
+    assert.ok(actions.has('SHIFT_OPENED'));
+    assert.ok(actions.has('SHIFT_CLOSED'));
+    assert.ok(actions.has('CASH_MOVEMENT_RECORDED'));
+    assert.ok(actions.has('SHIFT_DISCREPANCY_APPROVED'));
+    assert.ok(actions.has('SHIFT_SETTINGS_UPDATED'));
+  });
+});
+
+describe('Phase 11 — Return, Refund & Void', () => {
+  let p11AdminToken = '';
+  let p11SupervisorToken = '';
+  let p11CashierToken = '';
+  let p11ProdAId = '';
+  let p11ProdBId = '';
+  let p11CustomerId = '';
+
+  before(async () => {
+    const adminRes = await api<{ accessToken: string }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier: 'admin', password: 'Admin123!' }),
+    });
+    assert.equal(adminRes.status, 200);
+    p11AdminToken = adminRes.body.accessToken;
+
+    const spvRes = await api<{ accessToken: string }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier: 'supervisor', password: 'Super123!' }),
+    });
+    assert.equal(spvRes.status, 200);
+    p11SupervisorToken = spvRes.body.accessToken;
+
+    const cashierRes = await api<{ accessToken: string }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier: 'kasir', password: 'Kasir123!' }),
+    });
+    assert.equal(cashierRes.status, 200);
+    p11CashierToken = cashierRes.body.accessToken;
+
+    const pA = await api<{ product: { id: string } }>('/api/products', {
+      method: 'POST',
+      token: p11AdminToken,
+      body: JSON.stringify({
+        sku: 'SKU-P11-A',
+        barcode: '8998888110018',
+        name: 'Kopi Sachet P11 (Rp 3.333)',
+        category: 'Minuman',
+        unit: 'PCS',
+        costPrice: 2000,
+        sellPrice: 3333,
+        stock: 50,
+        minStock: 5,
+        taxCategory: 'EXEMPT',
+      }),
+    });
+    assert.equal(pA.status, 201);
+    p11ProdAId = pA.body.product.id;
+
+    const pB = await api<{ product: { id: string } }>('/api/products', {
+      method: 'POST',
+      token: p11AdminToken,
+      body: JSON.stringify({
+        sku: 'SKU-P11-B',
+        barcode: '8998888110025',
+        name: 'Biskuit Kaleng P11 (Rp 10.000)',
+        category: 'Makanan',
+        unit: 'TIN',
+        costPrice: 6000,
+        sellPrice: 10000,
+        stock: 30,
+        minStock: 5,
+        taxCategory: 'EXEMPT',
+      }),
+    });
+    assert.equal(pB.status, 201);
+    p11ProdBId = pB.body.product.id;
+
+    const custRes = await api<{ customer: { id: string } }>('/api/customers', {
+      method: 'POST',
+      token: p11AdminToken,
+      body: JSON.stringify({
+        name: 'Budi Member P11',
+        phone: `081211${Date.now().toString().slice(-6)}`,
+        email: `budip11-${Date.now()}@kassaritel.id`,
+      }),
+    });
+    assert.equal(custRes.status, 201);
+    p11CustomerId = custRes.body.customer.id;
+
+    await api(`/api/customers/${p11CustomerId}/loyalty/adjust`, {
+      method: 'POST',
+      token: p11AdminToken,
+      body: JSON.stringify({ pointsDelta: 50, notes: 'Saldo awal Phase 11' }),
+    });
+  });
+
+  it('searches receipts, validates multi-step partial return rounding, enforces PIN/over-qty/idempotency, and handles all 4 stock dispositions', async () => {
+    // Ensure cashier has an active open shift to verify CASH_REFUND cash movement
+    const curShiftCheck = await api<{ currentShift: { id: string } | null }>('/api/shifts/current', {
+      token: p11CashierToken,
+    });
+    let shiftId = curShiftCheck.body.currentShift?.id ?? '';
+    if (!shiftId) {
+      const openRes = await api<{ shift: { id: string } }>('/api/shifts/open', {
+        method: 'POST',
+        token: p11CashierToken,
+        body: JSON.stringify({ openingCash: 100000, registerName: 'Kasir Retur P11' }),
+      });
+      assert.equal(openRes.status, 201);
+      shiftId = openRes.body.shift.id;
+    }
+
+    // Checkout 3x ProdA (9.999) + 1x ProdB (10.000) = 19.999, manual discount Rp 1.000 => total = 18.999
+    // Using Supervisor PIN for discount approval so cashier can complete discounted checkout
+    const discPin = await api<{ pinApprovalToken: string }>('/api/auth/verify-pin', {
+      method: 'POST',
+      token: p11CashierToken,
+      body: JSON.stringify({
+        authorizerIdentifier: 'supervisor',
+        pin: '654321',
+        action: 'discount_approval',
+        reason: 'Diskon uji retur proporsional',
+      }),
+    });
+    assert.equal(discPin.status, 200);
+
+    const saleRes = await api<{
+      transaction: { id: string; invoiceNumber: string; total: number; items: Array<{ id: string; productId: string; qty: number }> };
+    }>('/api/transactions', {
+      method: 'POST',
+      token: p11CashierToken,
+      body: JSON.stringify({
+        items: [
+          { productId: p11ProdAId, qty: 3 },
+          { productId: p11ProdBId, qty: 1 },
+        ],
+        transactionDiscountType: 'AMOUNT',
+        transactionDiscountValue: 1000,
+        applyTax: false,
+        paymentMethod: 'Tunai',
+        cashReceived: 20000,
+        pinApprovalToken: discPin.body.pinApprovalToken,
+      }),
+    });
+    assert.equal(saleRes.status, 201);
+    assert.equal(saleRes.body.transaction.total, 18999);
+    const trxId = saleRes.body.transaction.id;
+    const invNo = saleRes.body.transaction.invoiceNumber;
+
+    // Fetch receipt to verify frozen receiptNumber & search by receiptNumber
+    const recRes = await api<{ receipt: { snapshot: { receiptNumber: string } } }>(
+      `/api/transactions/${trxId}/receipt`,
+      { token: p11CashierToken }
+    );
+    assert.equal(recRes.status, 200);
+    const receiptNo = recRes.body.receipt.snapshot.receiptNumber;
+
+    const searchByRec = await api<{
+      results: Array<{ transaction: { id: string }; receiptNumber: string; canReturn: boolean; canVoid: boolean }>;
+    }>(`/api/returns-voids/search?search=${encodeURIComponent(receiptNo)}`, {
+      token: p11CashierToken,
+    });
+    assert.equal(searchByRec.status, 200);
+    assert.ok(searchByRec.body.results.some((r) => r.transaction.id === trxId && r.canReturn && r.canVoid));
+
+    // Fetch eligibility detail
+    const eligRes = await api<{
+      eligibility: {
+        items: Array<{ transactionItemId: string; productId: string; remainingQty: number }>;
+        remainingRefundableTotal: number;
+      };
+    }>(`/api/transactions/${trxId}/return-eligibility`, { token: p11CashierToken });
+    assert.equal(eligRes.status, 200);
+    assert.equal(eligRes.body.eligibility.remainingRefundableTotal, 18999);
+    const itemA = eligRes.body.eligibility.items.find((i) => i.productId === p11ProdAId)!;
+    const itemB = eligRes.body.eligibility.items.find((i) => i.productId === p11ProdBId)!;
+    assert.ok(itemA && itemB);
+
+    // Stock after sale: ProdA = 47, ProdB = 29
+    const prodAAfterSale = await api<{ product: { stock: number } }>(`/api/products/${p11ProdAId}`, {
+      token: p11AdminToken,
+    });
+    assert.equal(prodAAfterSale.body.product.stock, 47);
+
+    // 1. Cashier without PIN cannot execute return -> 403 PIN_REQUIRED
+    const denyNoPin = await api<{ code: string }>(`/api/transactions/${trxId}/returns`, {
+      method: 'POST',
+      token: p11CashierToken,
+      body: JSON.stringify({
+        items: [{ transactionItemId: itemA.transactionItemId, qty: 1, stockDisposition: 'SELLABLE' }],
+        reason: 'Barang cacat',
+      }),
+    });
+    assert.equal(denyNoPin.status, 403);
+    assert.equal(denyNoPin.body.code, 'PIN_REQUIRED');
+
+    // 2. Partial Return Step 1 (Cashier + Supervisor PIN): 1x ProdA as SELLABLE, CASH refund, with idempotencyKey
+    const retPin1 = await api<{ pinApprovalToken: string }>('/api/auth/verify-pin', {
+      method: 'POST',
+      token: p11CashierToken,
+      body: JSON.stringify({
+        authorizerIdentifier: 'supervisor',
+        pin: '654321',
+        action: 'refund',
+        reason: 'Setujui retur 1 unit layak jual',
+      }),
+    });
+    assert.equal(retPin1.status, 200);
+
+    const idemKey1 = `p11-ret-1-${Date.now()}`;
+    const ret1 = await api<{
+      returnRecord: { id: string; returnNumber: string; returnType: string; totalRefundAmount: number; status: string };
+      refundRecord: { id: string; status: string; paymentType: string; cashMovementId: string | null };
+      idempotentReplay: boolean;
+    }>(`/api/transactions/${trxId}/returns`, {
+      method: 'POST',
+      token: p11CashierToken,
+      body: JSON.stringify({
+        items: [{ transactionItemId: itemA.transactionItemId, qty: 1, stockDisposition: 'SELLABLE' }],
+        reason: 'Kelebihan beli',
+        refundMethod: 'Tunai',
+        refundPaymentType: 'CASH',
+        idempotencyKey: idemKey1,
+        pinApprovalToken: retPin1.body.pinApprovalToken,
+      }),
+    });
+    assert.equal(ret1.status, 201);
+    assert.equal(ret1.body.returnRecord.returnType, 'PARTIAL');
+    assert.equal(ret1.body.returnRecord.status, 'COMPLETED');
+    assert.equal(ret1.body.refundRecord.status, 'COMPLETED');
+    assert.equal(ret1.body.refundRecord.paymentType, 'CASH');
+    assert.ok(ret1.body.refundRecord.cashMovementId);
+    const refundStep1 = ret1.body.returnRecord.totalRefundAmount;
+    assert.ok(refundStep1 > 0 && refundStep1 < 18999);
+
+    // Duplicate idempotency replay returns 200 without duplicating return or restocking again
+    const replay1 = await api<{ idempotentReplay: boolean; returnRecord: { id: string } }>(
+      `/api/transactions/${trxId}/returns`,
+      {
+        method: 'POST',
+        token: p11CashierToken,
+        body: JSON.stringify({
+          items: [{ transactionItemId: itemA.transactionItemId, qty: 1, stockDisposition: 'SELLABLE' }],
+          reason: 'Kelebihan beli',
+          idempotencyKey: idemKey1,
+        }),
+      }
+    );
+    assert.equal(replay1.status, 200);
+    assert.equal(replay1.body.idempotentReplay, true);
+    assert.equal(replay1.body.returnRecord.id, ret1.body.returnRecord.id);
+
+    // ProdA stock should now be 47 + 1 = 48 (RETURN_IN)
+    const prodAAfterRet1 = await api<{ product: { stock: number } }>(`/api/products/${p11ProdAId}`, {
+      token: p11AdminToken,
+    });
+    assert.equal(prodAAfterRet1.body.product.stock, 48);
+
+    // Verify open shift recorded CASH_REFUND equal to refundStep1
+    const shiftRpt1 = await api<{ report: { reconciliation: { cashRefunds: number } } }>(
+      `/api/shifts/${shiftId}`,
+      { token: p11CashierToken }
+    );
+    assert.ok(shiftRpt1.body.report.reconciliation.cashRefunds >= refundStep1);
+
+    // 3. Reject returning more than remaining quantity (3 > 2 remaining on ProdA) -> 400
+    const overQty = await api<{ error: string }>(`/api/transactions/${trxId}/returns`, {
+      method: 'POST',
+      token: p11SupervisorToken,
+      body: JSON.stringify({
+        items: [{ transactionItemId: itemA.transactionItemId, qty: 3, stockDisposition: 'SELLABLE' }],
+        reason: 'Uji melebihi kuota',
+      }),
+    });
+    assert.equal(overQty.status, 400);
+
+    // 4. Reject refund amount exceeding remaining refundable total -> 400
+    const overRefund = await api<{ error: string }>(`/api/transactions/${trxId}/returns`, {
+      method: 'POST',
+      token: p11SupervisorToken,
+      body: JSON.stringify({
+        items: [{ transactionItemId: itemA.transactionItemId, qty: 1, stockDisposition: 'DAMAGED' }],
+        reason: 'Uji refund berlebih',
+        refundAmount: 19000,
+      }),
+    });
+    assert.equal(overRefund.status, 400);
+
+    // 5. Partial Return Step 2: 1x ProdA as DAMAGED + 1x ProdB as PENDING_INSPECTION (Non-Cash TRANSFER manual)
+    // Stock must NOT increase for DAMAGED or PENDING_INSPECTION!
+    const ret2 = await api<{
+      returnRecord: {
+        id: string;
+        status: string;
+        totalRefundAmount: number;
+        items: Array<{ id: string; productId: string; stockDisposition: string }>;
+      };
+      refundRecord: { id: string; status: string; paymentType: string };
+    }>(`/api/transactions/${trxId}/returns`, {
+      method: 'POST',
+      token: p11SupervisorToken,
+      body: JSON.stringify({
+        items: [
+          { transactionItemId: itemA.transactionItemId, qty: 1, stockDisposition: 'DAMAGED' },
+          { transactionItemId: itemB.transactionItemId, qty: 1, stockDisposition: 'PENDING_INSPECTION' },
+        ],
+        reason: 'Kemasan penyok & cek QC kaleng',
+        refundMethod: 'Transfer Bank',
+        refundPaymentType: 'TRANSFER',
+        refundReference: 'TRF-P11-001',
+        refundStatus: 'PENDING',
+      }),
+    });
+    assert.equal(ret2.status, 201);
+    assert.equal(ret2.body.returnRecord.status, 'PENDING_INSPECTION');
+    assert.equal(ret2.body.refundRecord.status, 'PENDING');
+    assert.equal(ret2.body.refundRecord.paymentType, 'TRANSFER');
+    const refundStep2 = ret2.body.returnRecord.totalRefundAmount;
+
+    // Verify stocks unchanged: ProdA still 48, ProdB still 29
+    const prodAAfterRet2 = await api<{ product: { stock: number } }>(`/api/products/${p11ProdAId}`, {
+      token: p11AdminToken,
+    });
+    const prodBAfterRet2 = await api<{ product: { stock: number } }>(`/api/products/${p11ProdBId}`, {
+      token: p11AdminToken,
+    });
+    assert.equal(prodAAfterRet2.body.product.stock, 48);
+    assert.equal(prodBAfterRet2.body.product.stock, 29);
+
+    // Resolve PENDING_INSPECTION item on ProdB -> SELLABLE => ProdB stock increases 29 -> 30 and return becomes COMPLETED
+    const pendingItemB = ret2.body.returnRecord.items.find((i) => i.productId === p11ProdBId)!;
+    const resolveQc = await api<{
+      returnRecord: { status: string };
+      item: { finalDisposition: string; stockMovementId: string | null };
+    }>(`/api/returns/items/${pendingItemB.id}/resolve-inspection`, {
+      method: 'POST',
+      token: p11SupervisorToken,
+      body: JSON.stringify({ disposition: 'SELLABLE', notes: 'Segel masih utuh layak jual' }),
+    });
+    assert.equal(resolveQc.status, 200);
+    assert.equal(resolveQc.body.returnRecord.status, 'COMPLETED');
+    assert.equal(resolveQc.body.item.finalDisposition, 'SELLABLE');
+    assert.ok(resolveQc.body.item.stockMovementId);
+
+    const prodBAfterQc = await api<{ product: { stock: number } }>(`/api/products/${p11ProdBId}`, {
+      token: p11AdminToken,
+    });
+    assert.equal(prodBAfterQc.body.product.stock, 30);
+
+    // Cashier cannot update refund status (403); Supervisor updates PENDING -> COMPLETED
+    const denyRefStatus = await api<{ error: string }>(
+      `/api/refunds/${ret2.body.refundRecord.id}/status`,
+      {
+        method: 'PATCH',
+        token: p11CashierToken,
+        body: JSON.stringify({ status: 'COMPLETED' }),
+      }
+    );
+    assert.equal(denyRefStatus.status, 403);
+
+    const okRefStatus = await api<{ refundRecord: { status: string; referenceNumber: string } }>(
+      `/api/refunds/${ret2.body.refundRecord.id}/status`,
+      {
+        method: 'PATCH',
+        token: p11SupervisorToken,
+        body: JSON.stringify({ status: 'COMPLETED', referenceNumber: 'TRF-P11-SETTLED' }),
+      }
+    );
+    assert.equal(okRefStatus.status, 200);
+    assert.equal(okRefStatus.body.refundRecord.status, 'COMPLETED');
+    assert.equal(okRefStatus.body.refundRecord.referenceNumber, 'TRF-P11-SETTLED');
+
+    // 6. Final Return Step 3: remaining 1x ProdA as UNSELLABLE -> must allocate exact remaining cents so sum === 18.999!
+    const ret3 = await api<{
+      returnRecord: { totalRefundAmount: number };
+      transaction: { returnStatus: string; paymentStatus: string; refundedTotal: number };
+    }>(`/api/transactions/${trxId}/returns`, {
+      method: 'POST',
+      token: p11SupervisorToken,
+      body: JSON.stringify({
+        items: [{ transactionItemId: itemA.transactionItemId, qty: 1, stockDisposition: 'UNSELLABLE' }],
+        reason: 'Retur sisa item tidak layak jual',
+        refundMethod: 'QRIS',
+        refundPaymentType: 'QRIS',
+        refundReference: 'QRIS-REF-99',
+      }),
+    });
+    assert.equal(ret3.status, 201);
+    const refundStep3 = ret3.body.returnRecord.totalRefundAmount;
+    assert.equal(refundStep1 + refundStep2 + refundStep3, 18999);
+    assert.equal(ret3.body.transaction.refundedTotal, 18999);
+    assert.equal(ret3.body.transaction.returnStatus, 'FULL');
+    assert.equal(ret3.body.transaction.paymentStatus, 'REFUNDED');
+
+    // UNSELLABLE does not change ProdA stock (still 48)
+    const prodAAfterRet3 = await api<{ product: { stock: number } }>(`/api/products/${p11ProdAId}`, {
+      token: p11AdminToken,
+    });
+    assert.equal(prodAAfterRet3.body.product.stock, 48);
+
+    // Attempting Void on a transaction that already has returns must be rejected with 409
+    const voidAfterRet = await api<{ error: string }>(`/api/transactions/${trxId}/void`, {
+      method: 'POST',
+      token: p11SupervisorToken,
+      body: JSON.stringify({ reason: 'Coba void setelah retur' }),
+    });
+    assert.equal(voidAfterRet.status, 409);
+
+    // Also verify product price change in catalog did NOT change historical receipt totals on this returned trx
+    await api(`/api/products/${p11ProdAId}`, {
+      method: 'PUT',
+      token: p11AdminToken,
+      body: JSON.stringify({ sellPrice: 9999 }),
+    });
+    const histReceipt = await api<{ receipt: { transaction: { total: number; items: Array<{ productId: string; sellPrice: number }> } } }>(
+      `/api/transactions/${trxId}/receipt`,
+      { token: p11CashierToken }
+    );
+    assert.equal(histReceipt.status, 200);
+    assert.equal(histReceipt.body.receipt.transaction.total, 18999);
+    assert.equal(
+      histReceipt.body.receipt.transaction.items.find((i) => i.productId === p11ProdAId)?.sellPrice,
+      3333
+    );
+
+    // Restore ProdA sellPrice back to 3333 and close cashier shift cleanly
+    await api(`/api/products/${p11ProdAId}`, {
+      method: 'PUT',
+      token: p11AdminToken,
+      body: JSON.stringify({ sellPrice: 3333 }),
+    });
+    const finalShiftRpt = await api<{ report: { reconciliation: { expectedCash: number } } }>(
+      `/api/shifts/${shiftId}`,
+      { token: p11CashierToken }
+    );
+    await api(`/api/shifts/${shiftId}/close`, {
+      method: 'POST',
+      token: p11CashierToken,
+      body: JSON.stringify({ actualCash: finalShiftRpt.body.report.reconciliation.expectedCash, confirmed: true }),
+    });
+  });
+
+  it('voids a completed transaction with PIN/permission, restores stock (VOID_IN), reverses loyalty points, avoids double shift subtraction, preserves archive/receipt, and writes audit logs', async () => {
+    // Open a fresh shift for Cashier to verify same-shift void cash reconciliation
+    const openShiftRes = await api<{ shift: { id: string } }>('/api/shifts/open', {
+      method: 'POST',
+      token: p11CashierToken,
+      body: JSON.stringify({ openingCash: 100000, registerName: 'Kasir Void Uji' }),
+    });
+    assert.equal(openShiftRes.status, 201);
+    const shiftId = openShiftRes.body.shift.id;
+
+    // Customer Budi (50 points) buys 2x ProdB (Rp 20.000) and redeems 10 points (-Rp 1.000) -> net Rp 19.000 CASH
+    // Assuming disableEarnOnRedeem=false from earlier or check balance before & after
+    const custBefore = await api<{ customer: { loyaltyPoints: number } }>(
+      `/api/customers/${p11CustomerId}`,
+      { token: p11CashierToken }
+    );
+    const pointsBeforeSale = custBefore.body.customer.loyaltyPoints;
+
+    const saleRes = await api<{
+      transaction: {
+        id: string;
+        invoiceNumber: string;
+        total: number;
+        loyaltyPointsEarned: number;
+        loyaltyPointsRedeemed: number;
+      };
+    }>('/api/transactions', {
+      method: 'POST',
+      token: p11CashierToken,
+      body: JSON.stringify({
+        customerId: p11CustomerId,
+        items: [{ productId: p11ProdBId, qty: 2 }],
+        loyaltyPointsToRedeem: 10,
+        applyTax: false,
+        paymentMethod: 'Tunai',
+        cashReceived: 20000,
+      }),
+    });
+    assert.equal(saleRes.status, 201);
+    const trxId = saleRes.body.transaction.id;
+    assert.equal(saleRes.body.transaction.total, 19000);
+
+    // During open shift before void: expectedCash = 100.000 + 19.000 = 119.000
+    const midShift = await api<{ report: { reconciliation: { expectedCash: number; cashSales: number } } }>(
+      `/api/shifts/${shiftId}`,
+      { token: p11CashierToken }
+    );
+    assert.equal(midShift.body.report.reconciliation.cashSales, 19000);
+    assert.equal(midShift.body.report.reconciliation.expectedCash, 119000);
+
+    // ProdB stock before void: 30 - 2 = 28
+    const prodBeforeVoid = await api<{ product: { stock: number } }>(`/api/products/${p11ProdBId}`, {
+      token: p11AdminToken,
+    });
+    assert.equal(prodBeforeVoid.body.product.stock, 28);
+
+    // Cashier without pos:void gets 403 PIN_REQUIRED
+    const denyVoid = await api<{ code: string }>(`/api/transactions/${trxId}/void`, {
+      method: 'POST',
+      token: p11CashierToken,
+      body: JSON.stringify({ reason: 'Salah input total' }),
+    });
+    assert.equal(denyVoid.status, 403);
+    assert.equal(denyVoid.body.code, 'PIN_REQUIRED');
+
+    // Verify Supervisor PIN with action='void' and void transaction as Cashier
+    const voidPin = await api<{ pinApprovalToken: string }>('/api/auth/verify-pin', {
+      method: 'POST',
+      token: p11CashierToken,
+      body: JSON.stringify({
+        authorizerIdentifier: 'supervisor',
+        pin: '654321',
+        action: 'void',
+        reason: 'Pelanggan batal beli setelah bayar',
+      }),
+    });
+    assert.equal(voidPin.status, 200);
+
+    const voidRes = await api<{
+      voidRecord: { voidNumber: string; stockRestoredQty: number; voidedTotal: number };
+      refundRecord: { status: string; amount: number };
+      transaction: { id: string; status: string; paymentStatus: string; voidNumber: string; refundedTotal: number };
+    }>(`/api/transactions/${trxId}/void`, {
+      method: 'POST',
+      token: p11CashierToken,
+      body: JSON.stringify({
+        reason: 'Pelanggan batal beli setelah bayar',
+        refundMethod: 'Tunai',
+        refundPaymentType: 'CASH',
+        pinApprovalToken: voidPin.body.pinApprovalToken,
+      }),
+    });
+    assert.equal(voidRes.status, 200);
+    assert.ok(voidRes.body.voidRecord.voidNumber.startsWith('VOD-'));
+    assert.equal(voidRes.body.voidRecord.stockRestoredQty, 2);
+    assert.equal(voidRes.body.voidRecord.voidedTotal, 19000);
+    assert.equal(voidRes.body.transaction.status, 'VOIDED');
+    assert.equal(voidRes.body.transaction.paymentStatus, 'REFUNDED');
+    assert.equal(voidRes.body.transaction.refundedTotal, 19000);
+
+    // ProdB stock restored back to 30 via VOID_IN
+    const prodAfterVoid = await api<{ product: { stock: number } }>(`/api/products/${p11ProdBId}`, {
+      token: p11AdminToken,
+    });
+    assert.equal(prodAfterVoid.body.product.stock, 30);
+
+    const cardRes = await api<{ movements: Array<{ type: string; qtyDelta: number }> }>(
+      `/api/inventory/products/${p11ProdBId}/stock-card?type=VOID_IN`,
+      { token: p11AdminToken }
+    );
+    assert.equal(cardRes.status, 200);
+    assert.ok(cardRes.body.movements.some((m) => m.type === 'VOID_IN' && m.qtyDelta === 2));
+
+    // Loyalty points restored accurately back to pointsBeforeSale
+    const custAfterVoid = await api<{ customer: { loyaltyPoints: number } }>(
+      `/api/customers/${p11CustomerId}`,
+      { token: p11CashierToken }
+    );
+    assert.equal(custAfterVoid.body.customer.loyaltyPoints, pointsBeforeSale);
+
+    // Same-shift expectedCash must revert cleanly to 100.000 (NOT 81.000 double-subtracted!)
+    const afterVoidShift = await api<{
+      report: { reconciliation: { cashSales: number; cashRefunds: number; expectedCash: number } };
+    }>(`/api/shifts/${shiftId}`, { token: p11CashierToken });
+    assert.equal(afterVoidShift.body.report.reconciliation.cashSales, 0);
+    assert.equal(afterVoidShift.body.report.reconciliation.cashRefunds, 0);
+    assert.equal(afterVoidShift.body.report.reconciliation.expectedCash, 100000);
+
+    // Archive preserved: GET transaction & receipt still work (200), DELETE rejected (409), double VOID rejected (409), return on VOIDED rejected (409)
+    const getVoidedTrx = await api<{ transaction: { status: string } }>(`/api/transactions/${trxId}`, {
+      token: p11CashierToken,
+    });
+    assert.equal(getVoidedTrx.status, 200);
+    assert.equal(getVoidedTrx.body.transaction.status, 'VOIDED');
+
+    const getVoidedReceipt = await api<{ receipt: { transaction: { status: string; total: number } } }>(
+      `/api/transactions/${trxId}/receipt`,
+      { token: p11CashierToken }
+    );
+    assert.equal(getVoidedReceipt.status, 200);
+    assert.equal(getVoidedReceipt.body.receipt.transaction.status, 'VOIDED');
+    assert.equal(getVoidedReceipt.body.receipt.transaction.total, 19000);
+
+    const delVoided = await api<{ error: string }>(`/api/transactions/${trxId}`, {
+      method: 'DELETE',
+      token: p11AdminToken,
+    });
+    assert.equal(delVoided.status, 409);
+
+    const doubleVoid = await api<{ error: string }>(`/api/transactions/${trxId}/void`, {
+      method: 'POST',
+      token: p11SupervisorToken,
+      body: JSON.stringify({ reason: 'Void ulang' }),
+    });
+    assert.equal(doubleVoid.status, 409);
+
+    const returnOnVoided = await api<{ error: string }>(`/api/transactions/${trxId}/returns`, {
+      method: 'POST',
+      token: p11SupervisorToken,
+      body: JSON.stringify({
+        items: [{ transactionItemId: 'any', qty: 1, stockDisposition: 'SELLABLE' }],
+        reason: 'Retur transaksi void',
+      }),
+    });
+    assert.equal(returnOnVoided.status, 409);
+
+    // Close test shift
+    await api(`/api/shifts/${shiftId}/close`, {
+      method: 'POST',
+      token: p11CashierToken,
+      body: JSON.stringify({ actualCash: 100000, confirmed: true }),
+    });
+
+    // Check summary, void history & sensitive audit logs
+    const sumRes = await api<{
+      summary: { totalReturns: number; totalVoided: number; totalRefundAmount: number };
+    }>('/api/returns-voids/summary', { token: p11AdminToken });
+    assert.equal(sumRes.status, 200);
+    assert.ok(sumRes.body.summary.totalReturns >= 3);
+    assert.ok(sumRes.body.summary.totalVoided >= 1);
+    assert.ok(sumRes.body.summary.totalRefundAmount >= 18999 + 19000);
+
+    const auditRes = await api<{ auditLogs: Array<{ action: string }> }>('/api/audit-logs', {
+      token: p11AdminToken,
+    });
+    assert.equal(auditRes.status, 200);
+    const actions = new Set(auditRes.body.auditLogs.map((l) => l.action));
+    assert.ok(actions.has('RETURN_CREATED'));
+    assert.ok(actions.has('RETURN_INSPECTION_RESOLVED'));
+    assert.ok(actions.has('REFUND_RECORDED'));
+    assert.ok(actions.has('REFUND_STATUS_UPDATED'));
+    assert.ok(actions.has('TRANSACTION_VOIDED'));
+  });
+});
+
+
+
 
 

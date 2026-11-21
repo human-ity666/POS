@@ -64,6 +64,23 @@ export function ReceiptDocument({
           </div>
         </div>
 
+        {trx.status === 'VOIDED' && (
+          <div className="my-3 p-3 border border-rose-300 bg-rose-50 text-rose-900 rounded text-xs">
+            <p className="font-bold uppercase tracking-wide">
+              TRANSAKSI DI-VOID ({trx.voidNumber || 'VOID'}) · REKAMAN HISTORIS
+            </p>
+            <p className="mt-0.5">
+              Alasan: {trx.voidReason || '-'} · Dana dikembalikan: {formatRupiah(trx.refundedTotal ?? trx.total)}
+            </p>
+          </div>
+        )}
+
+        {trx.status === 'COMPLETED' && (trx.refundedTotal ?? 0) > 0 && (
+          <div className="my-3 p-2.5 border border-amber-300 bg-amber-50 text-amber-900 rounded text-xs">
+            Tercatat Retur / Refund sebesar <span className="font-mono font-bold">{formatRupiah(trx.refundedTotal ?? 0)}</span>. Nilai struk asli di bawah tidak diubah.
+          </div>
+        )}
+
         {/* Metadata Grid */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 py-4 border-b border-slate-200 text-xs">
           <div>
@@ -290,6 +307,16 @@ export function ReceiptDocument({
           <p className="font-sans text-[10px] text-slate-700 mt-1">{snapshot.receiptHeaderNote}</p>
         )}
         <p className="text-[10px] font-bold tracking-wider text-slate-500 mt-1.5">{copyTag}</p>
+        {trx.status === 'VOIDED' && (
+          <p className="text-[10px] font-bold text-rose-700 mt-1 border border-rose-300 bg-rose-50 py-1 px-1.5">
+            TRANSAKSI DI-VOID ({trx.voidNumber || 'VOID'})
+          </p>
+        )}
+        {trx.status === 'COMPLETED' && (trx.refundedTotal ?? 0) > 0 && (
+          <p className="text-[10px] font-semibold text-amber-800 mt-1">
+            RETUR TERCATAT: {formatRupiah(trx.refundedTotal ?? 0)}
+          </p>
+        )}
       </div>
 
       {/* Transaction Meta */}

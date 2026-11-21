@@ -23,6 +23,10 @@ export function movementTypeLabel(type: StockMovementType): string {
       return 'Penyesuaian (-)';
     case 'OPNAME':
       return 'Stok Opname';
+    case 'RETURN_IN':
+      return 'Retur Layak Jual (+)';
+    case 'VOID_IN':
+      return 'Void Transaksi (+)';
     case 'STOK_AWAL':
       return 'Stok Awal';
   }
@@ -229,6 +233,8 @@ export function StockCardModal({ productId, onClose }: StockCardModalProps) {
                   <option value="ADJUSTMENT_IN">Penyesuaian (+)</option>
                   <option value="ADJUSTMENT_OUT">Penyesuaian (-)</option>
                   <option value="OPNAME">Stok Opname</option>
+                  <option value="RETURN_IN">Retur Layak Jual (+)</option>
+                  <option value="VOID_IN">Void Transaksi (+)</option>
                   <option value="RESTOK">Restok Cepat</option>
                   <option value="STOK_AWAL">Stok Awal</option>
                 </select>

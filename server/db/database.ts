@@ -51,6 +51,7 @@ const DEFAULT_PERMISSIONS: Permission[] = [
   { id: 'perm-pos-hold', code: 'pos:hold', module: 'POS & Kasir', action: 'execute', label: 'Tahan Transaksi (Hold)', description: 'Menyimpan sementara keranjang kasir untuk pelanggan lain' },
   { id: 'perm-pos-resume', code: 'pos:resume', module: 'POS & Kasir', action: 'execute', label: 'Lanjutkan Transaksi Hold', description: 'Membuka kembali keranjang transaksi yang ditahan' },
   { id: 'perm-pos-cancel', code: 'pos:cancel', module: 'POS & Kasir', action: 'delete', label: 'Batalkan Draft / Hold Transaksi', description: 'Membatalkan transaksi yang ditahan atau sedang berjalan' },
+  { id: 'perm-pos-item-cancel', code: 'pos:item_cancel', module: 'POS & Kasir', action: 'delete', label: 'Batalkan Item', description: 'Otoritas pembatalan pembelian item/produk yang ada di keranjang kasir' },
   { id: 'perm-pos-void', code: 'pos:void', module: 'POS & Kasir', action: 'execute', label: 'Batalkan Transaksi (Void)', description: 'Otorisasi pembatalan struk penjualan' },
   { id: 'perm-pos-refund', code: 'pos:refund', module: 'POS & Kasir', action: 'execute', label: 'Proses Pengembalian (Refund)', description: 'Otorisasi retur barang dan refund dana' },
 
@@ -90,6 +91,14 @@ const DEFAULT_PERMISSIONS: Permission[] = [
   { id: 'perm-prm-view', code: 'promotions:view', module: 'Pelanggan & Promosi', action: 'view', label: 'Lihat Daftar Promosi', description: 'Melihat promosi aktif, jadwal promo, dan memilih promo di kasir' },
   { id: 'perm-prm-manage', code: 'promotions:manage', module: 'Pelanggan & Promosi', action: 'edit', label: 'Kelola Promosi & Aturan Loyalitas', description: 'Membuat, mengubah, mengaktifkan promo, dan mengatur aturan poin/stacking' },
 
+  // Buka/Tutup Toko & Kas (Phase 10 + Store-Wide Session)
+  { id: 'perm-shf-view', code: 'shifts:view', module: 'Buka/Tutup Toko & Kas', action: 'view', label: 'Lihat Status Toko & Laporan Kas', description: 'Melihat status buka/tutup toko aktif, riwayat operasional, mutasi kas, dan laporan rekonsiliasi' },
+  { id: 'perm-shf-open', code: 'shifts:open', module: 'Buka/Tutup Toko & Kas', action: 'create', label: 'Buka Toko', description: 'Membuka operasional toko dengan modal awal kas laci' },
+  { id: 'perm-shf-close', code: 'shifts:close', module: 'Buka/Tutup Toko & Kas', action: 'execute', label: 'Tutup Toko', description: 'Menutup operasional toko dan melakukan rekonsiliasi kas fisik' },
+  { id: 'perm-shf-cash', code: 'shifts:cash_movement', module: 'Buka/Tutup Toko & Kas', action: 'execute', label: 'Catat Kas Masuk / Keluar', description: 'Mencatat penambahan modal, setor kas laci, pengeluaran operasional, dan refund tunai' },
+  { id: 'perm-shf-approve', code: 'shifts:approve', module: 'Buka/Tutup Toko & Kas', action: 'approve', label: 'Setujui Selisih Kas Toko', description: 'Menyetujui selisih kas saat tutup toko (supervisor/admin)' },
+  { id: 'perm-shf-manage', code: 'shifts:manage', module: 'Buka/Tutup Toko & Kas', action: 'edit', label: 'Kelola Kebijakan Buka/Tutup Toko', description: 'Mengatur kebijakan wajib buka toko dan melihat seluruh laporan operasional toko' },
+
   // Audit & Sesi
   { id: 'perm-aud-view', code: 'audit:view', module: 'Audit & Sesi', action: 'view', label: 'Lihat Audit Log Sistem', description: 'Melihat jejak audit login, perubahan pengguna, dan otorisasi sensitif' },
   { id: 'perm-ses-view', code: 'sessions:view', module: 'Audit & Sesi', action: 'view', label: 'Lihat Semua Sesi Aktif', description: 'Memantau sesi login seluruh staf' },
@@ -106,6 +115,7 @@ const ROLE_PERMISSION_MAP: Record<string, string[]> = {
     'pos:hold',
     'pos:resume',
     'pos:cancel',
+    'pos:item_cancel',
     'pos:void',
     'pos:refund',
     'recognition:use',
@@ -124,6 +134,11 @@ const ROLE_PERMISSION_MAP: Record<string, string[]> = {
     'customers:edit',
     'promotions:view',
     'promotions:manage',
+    'shifts:view',
+    'shifts:open',
+    'shifts:close',
+    'shifts:cash_movement',
+    'shifts:approve',
     'users:view',
     'audit:view',
     'sessions:view',
@@ -139,6 +154,10 @@ const ROLE_PERMISSION_MAP: Record<string, string[]> = {
     'customers:view',
     'customers:create',
     'promotions:view',
+    'shifts:view',
+    'shifts:open',
+    'shifts:close',
+    'shifts:cash_movement',
   ],
 };
 
@@ -677,6 +696,7 @@ function seedRbacIfEmpty(db: DatabaseSync): void {
       'pos:hold',
       'pos:resume',
       'pos:cancel',
+      'pos:item_cancel',
       'recognition:use',
       'recognition:manage',
       'customers:view',
@@ -684,6 +704,9 @@ function seedRbacIfEmpty(db: DatabaseSync): void {
       'customers:edit',
       'promotions:view',
       'promotions:manage',
+      'shifts:view',
+      'shifts:cash_movement',
+      'shifts:approve',
     ]) {
       const permId = permIdByCode.get(code);
       if (permId) insertRolePerm.run('role-supervisor', permId);
@@ -695,6 +718,8 @@ function seedRbacIfEmpty(db: DatabaseSync): void {
       'customers:view',
       'customers:create',
       'promotions:view',
+      'shifts:view',
+      'shifts:cash_movement',
     ]) {
       const permId = permIdByCode.get(code);
       if (permId) insertRolePerm.run('role-cashier', permId);

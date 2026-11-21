@@ -25,7 +25,7 @@ Semua endpoint berada di bawah prefix `/api`. Kecuali ditandai sebagai **Publik*
 | `POST` | `/api/auth/logout` | Publik / Auth | Mencabut sesi aktif & membersihkan cookie autentikasi. |
 | `GET` | `/api/auth/me` | Authenticated | Mengembalikan profil & izin aktif `{ user, sessionId }`. |
 | `POST` | `/api/auth/change-password` | Authenticated | Body: `{ currentPassword, newPassword }`. |
-| `POST` | `/api/auth/verify-pin` | Authenticated | Body: `{ authorizerIdentifier, pin, action, reason? }`. Mengembalikan token single-use `pinApprovalToken` (berlaku 5 menit) untuk `discount_approval`, `price_override`, `void`, `refund`, atau `stock_adjustment`. |
+| `POST` | `/api/auth/verify-pin` | Authenticated | Body: `{ authorizerIdentifier, pin, action, reason? }`. Mengembalikan token single-use `pinApprovalToken` (berlaku 5 menit) untuk `discount_approval`, `price_override`, `void`, `refund`, `stock_adjustment`, `item_cancel`, atau `shift_discrepancy`. |
 | `GET` | `/api/sessions` | Authenticated (`sessions:view` untuk semua) | Daftar sesi aktif & riwayat login. Pengguna non-admin hanya melihat sesi miliknya. |
 | `DELETE` | `/api/sessions/:id` | `sessions:revoke` atau pemilik sesi | Memutus sesi aktif secara paksa. |
 
@@ -149,7 +149,7 @@ Semua endpoint berada di bawah prefix `/api`. Kecuali ditandai sebagai **Publik*
 
 | Method | Endpoint | Izin | Deskripsi |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/api/bootstrap` | Authenticated | Mengambil seluruh data awal dashboard (`products`, `categories`, `brands`, `uoms`, `customers`, `promotions`, `loyaltySettings`, `paymentMethods`, `heldTransactions`, `transactions`, `stockMovements`, `settings`, `auditLogs`). |
+| `GET` | `/api/bootstrap` | Authenticated | Mengambil seluruh data awal dashboard (`products`, `categories`, `brands`, `uoms`, `customers`, `promotions`, `loyaltySettings`, `paymentMethods`, `heldTransactions`, `transactions`, `stockMovements`, `settings`, `auditLogs`, `currentShift`, `shiftSettings`). |
 | `POST` | `/api/stock/adjust` | `stock:adjust` atau `pinApprovalToken` (`stock_adjustment`) | Penyesuaian restok masuk (`RESTOK`/`STOCK_IN`) atau stok opname (`OPNAME`) cepat. |
 | `PUT` | `/api/settings` | `settings:edit` | Memperbarui profil toko, PPN, `allowNegativeStock`, konfigurasi struk, serta kebijakan diskon & promo (`allowPromoStacking`, `allowManualWithPromo`, `maxCashierDiscountPercent`, `maxAuthorizedDiscountPercent`). |
 | `POST` | `/api/settings/logo` | `settings:edit` | Mengunggah logo toko (`PNG`/`JPG`/`WEBP`, maks 2 MB, validasi magic bytes) untuk dicetak pada struk. |
@@ -190,5 +190,38 @@ Semua endpoint berada di bawah prefix `/api`. Kecuali ditandai sebagai **Publik*
 | `PUT` | `/api/promotions/:id` | `promotions:manage` | Memperbarui aturan, periode, dan daftar target promosi. |
 | `PATCH` | `/api/promotions/:id/status` | `promotions:manage` | Mengaktifkan atau menonaktifkan promosi `{ status: 'ACTIVE' \| 'INACTIVE' }`. |
 
+---
 
+## 12. Manajemen Shift & Kas Kasir (Phase 10)
+
+| Method | Endpoint | Izin | Deskripsi & Payload |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/api/shifts/settings` | `shifts:view` / `shifts:open` / `shifts:manage` / `pos:view` / `settings:edit` | Mengambil konfigurasi kebijakan shift (`requireOpenShiftForSales`, `allowDuplicateOpenShifts`, `requireSupervisorApprovalOnDiscrepancy`, `discrepancyToleranceRp`). |
+| `PUT` | `/api/shifts/settings` | `shifts:manage` / `settings:edit` | Memperbarui konfigurasi kebijakan shift dan mencatat audit log `SHIFT_SETTINGS_UPDATED`. |
+| `GET` | `/api/shifts/current` | `shifts:view` / `shifts:open` / `pos:view` | Mengambil shift berstatus `OPEN` milik pengguna saat ini beserta `report` rekonsiliasi terkini dan `shiftSettings`. |
+| `POST` | `/api/shifts/open` | `shifts:open` | Membuka shift kasir baru `{ openingCash, registerName?, openingNotes? }` dengan nomor `SHF-YYYYMMDD-XXXX`. Menolak duplikasi shift terbuka per kasir jika `allowDuplicateOpenShifts = false` (`409 SHIFT_ALREADY_OPEN`). |
+| `GET` | `/api/shifts` | `shifts:view` / `shifts:open` / `shifts:approve` / `shifts:manage` / `reports:view` | Riwayat shift terpaginasi (`?search=&status=&discrepancyStatus=&cashierUserId=&dateFrom=&dateTo=&page=&pageSize=`). Kasir hanya melihat shift miliknya; Supervisor/Admin melihat seluruh shift. |
+| `GET` | `/api/shifts/:id` | `shifts:view` / `shifts:open` / `shifts:approve` / `shifts:manage` / `reports:view` | Laporan detail shift (`shift`, `reconciliation`, `paymentBreakdown[]`, `cashMovements[]`, `transactions[]`). |
+| `POST` | `/api/shifts/:id/cash-movements` | `shifts:cash_movement` | Mencatat mutasi kas laci `{ type: 'CASH_IN' \| 'CASH_OUT' \| 'EXPENSE' \| 'CASH_REFUND', amount, reason, referenceNumber?, notes? }` pada shift `OPEN` (`CM-YYYYMMDD-XXXX`). |
+| `POST` | `/api/shifts/:id/close` | `shifts:open` | Menutup shift kasir dengan penghitungan kas aktual `{ actualCash?, denominations?: [{ denomination, count }], closingNotes?, confirmed: true, supervisorPinToken? }`. Menghitung `expectedCash` deterministik dari transaksi & mutasi kas; menandai `PENDING_APPROVAL` jika selisih melebihi toleransi tanpa otorisasi Supervisor/PIN. |
+| `POST` | `/api/shifts/:id/approve` | `shifts:approve` | Menyetujui laporan selisih kas shift tertutup yang berstatus `PENDING_APPROVAL` `{ approvalNotes? }` dan mencatat `SHIFT_DISCREPANCY_APPROVED`. |
+
+---
+
+## 13. Retur, Refund & Void Transaksi (Phase 11)
+
+| Method | Endpoint | Izin | Deskripsi & Payload |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/api/returns-voids/summary` | `transactions:view` / `pos:view` / `pos:refund` / `pos:void` / `reports:view` | Ringkasan KPI retur, total refund tunai/non-tunai, antrean inspeksi QC, dan jumlah transaksi di-void. |
+| `GET` | `/api/returns-voids/search` | `transactions:view` / `pos:view` / `pos:refund` / `pos:void` | Pencarian transaksi selesai/di-void berdasarkan nomor struk (`receipt_number`), nomor invoice, pelanggan, atau nama produk (`?search=&limit=`). |
+| `GET` | `/api/transactions/:id/return-eligibility` | `transactions:view` / `pos:view` / `pos:refund` / `pos:void` | Detail kelayakan retur & void transaksi beserta item historis, jumlah sudah diretur, sisa kuota, riwayat retur, dan status void. |
+| `POST` | `/api/transactions/:id/returns/preview` | `transactions:view` / `pos:view` / `pos:refund` | Menghitung pratinjau nilai refund proporsional `BigInt` (subtotal, PPN, total refund, estimasi pembalikan poin) dari `{ items: [{ transactionItemId, qty, stockDisposition? }] }`. |
+| `POST` | `/api/transactions/:id/returns` | `pos:refund` atau `pinApprovalToken` (`refund`) | Memproses retur penuh/sebagian & mencatat refund `{ items: [{ transactionItemId, qty, stockDisposition }], reason, notes?, refundMethod?, refundPaymentType?, refundReference?, refundStatus?, refundAmount?, shiftId?, idempotencyKey?, pinApprovalToken? }`. Mengembalikan `201` (atau `200` `idempotentReplay: true`). |
+| `GET` | `/api/returns` | `transactions:view` / `pos:view` / `pos:refund` / `stock:view` / `reports:view` | Daftar riwayat retur barang (`?search=&status=&disposition=&limit=`). |
+| `GET` | `/api/returns/:id` | `transactions:view` / `pos:view` / `pos:refund` / `stock:view` | Detail dokumen retur (`RET-YYYYMMDD-XXXX`) beserta rincian item dan disposisi stok. |
+| `POST` | `/api/returns/items/:itemId/resolve-inspection` | `pos:refund` / `stock:adjust` atau `pinApprovalToken` (`refund`) | Menetapkan hasil QC untuk item berstatus `PENDING_INSPECTION` `{ disposition: 'SELLABLE' \| 'DAMAGED' \| 'UNSELLABLE', notes?, pinApprovalToken? }`. Hanya `SELLABLE` yang menambah stok jual (`RETURN_IN`). |
+| `POST` | `/api/transactions/:id/void` | `pos:void` atau `pinApprovalToken` (`void`) | Melakukan void transaksi `COMPLETED` yang belum memiliki retur `{ reason, notes?, refundMethod?, refundPaymentType?, refundReference?, refundStatus?, shiftId?, pinApprovalToken? }`. Menjaga arsip transaksi & struk tetap utuh (`status = 'VOIDED'`), memulihkan stok (`VOID_IN`), dan membalik poin loyalitas. |
+| `GET` | `/api/voids` | `transactions:view` / `pos:void` / `reports:view` / `audit:view` | Riwayat transaksi di-void (`VOD-YYYYMMDD-XXXX`, `?search=&limit=`). |
+| `GET` | `/api/refunds` | `transactions:view` / `pos:refund` / `pos:void` / `reports:view` | Buku besar seluruh refund tunai & non-tunai (`RFD-YYYYMMDD-XXXX`, `?search=&status=&paymentType=&sourceType=&limit=`). |
+| `PATCH` | `/api/refunds/:id/status` | `pos:refund` | Memperbarui status & referensi refund `{ status: 'COMPLETED' \| 'PENDING' \| 'MANUAL_RECORDED' \| 'FAILED', referenceNumber?, notes? }` serta mencatat `REFUND_STATUS_UPDATED`. |
 

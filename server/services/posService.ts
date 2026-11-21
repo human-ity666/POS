@@ -25,6 +25,7 @@ import {
 import { getLoyaltySettings } from './customerService.ts';
 import { ServiceError } from './errors.ts';
 import { listPromotions } from './promotionService.ts';
+import { getActiveShiftForUser, getShiftSettings } from './shiftService.ts';
 import type {
   BarcodeType,
   Product,
@@ -210,6 +211,8 @@ export function getBootstrapData(viewer?: UserSummary): StoreData {
     stockMovements: canViewStock ? queryStockMovements() : [],
     settings: querySettings(),
     auditLogs: canViewAudit ? listAuditLogs(db) : [],
+    currentShift: viewer ? getActiveShiftForUser(viewer.id) : null,
+    shiftSettings: getShiftSettings(),
   };
 }
 

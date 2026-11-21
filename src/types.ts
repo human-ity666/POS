@@ -174,9 +174,23 @@ export interface CsvImportPreviewResult {
 
 export type DiscountMode = 'AMOUNT' | 'PERCENT';
 
-export type TransactionStatus = 'NEW' | 'IN_PROGRESS' | 'HELD' | 'CANCELLED' | 'COMPLETED';
+export type TransactionStatus =
+  | 'NEW'
+  | 'IN_PROGRESS'
+  | 'HELD'
+  | 'CANCELLED'
+  | 'COMPLETED'
+  | 'VOIDED';
 
-export type PaymentStatus = 'UNPAID' | 'PARTIAL' | 'PAID' | 'CANCELLED';
+export type PaymentStatus =
+  | 'UNPAID'
+  | 'PARTIAL'
+  | 'PAID'
+  | 'CANCELLED'
+  | 'PARTIALLY_REFUNDED'
+  | 'REFUNDED';
+
+export type TransactionReturnStatus = 'NONE' | 'PARTIAL' | 'FULL';
 
 export type PaymentMethodType = 'CASH' | 'DEBIT' | 'CREDIT' | 'QRIS' | 'OTHER';
 
@@ -330,12 +344,15 @@ export interface TransactionPaymentRecord {
 }
 
 export interface TransactionItem {
+  id?: string;
   productId: string;
   sku?: string;
   barcode: string;
   name: string;
   unit: string;
   qty: number;
+  returnedQty?: number;
+  remainingReturnableQty?: number;
   originalSellPrice?: number;
   sellPrice: number;
   priceOverride?: boolean;
@@ -382,11 +399,22 @@ export interface Transaction {
   totalCost: number;
   grossProfit: number;
   notes: string;
+  shiftId?: string | null;
   cashierId?: string | null;
   cashierName: string;
   heldAt?: string | null;
   cancelledAt?: string | null;
   completedAt?: string | null;
+  returnStatus?: TransactionReturnStatus;
+  returnedTotal?: number;
+  refundedTotal?: number;
+  voidNumber?: string | null;
+  voidReason?: string | null;
+  voidedAt?: string | null;
+  voidedByUserId?: string | null;
+  voidedByName?: string | null;
+  voidApprovedByUserId?: string | null;
+  voidApprovedByName?: string | null;
   createdAt: string;
   updatedAt?: string;
 }
@@ -450,7 +478,9 @@ export type StockMovementType =
   | 'ADJUSTMENT_IN'
   | 'ADJUSTMENT_OUT'
   | 'OPNAME'
-  | 'STOK_AWAL';
+  | 'STOK_AWAL'
+  | 'RETURN_IN'
+  | 'VOID_IN';
 
 export interface StockMovement {
   id: string;
@@ -720,6 +750,7 @@ export type AuditAction =
   | 'TRANSACTION_RESUMED'
   | 'TRANSACTION_CANCELLED'
   | 'TRANSACTION_COMPLETED'
+  | 'ITEM_CANCELLED'
   | 'RECEIPT_PRINTED'
   | 'RECEIPT_REPRINTED'
   | 'CUSTOMER_CREATED'
@@ -736,7 +767,17 @@ export type AuditAction =
   | 'SETTINGS_UPDATED'
   | 'RECOGNITION_SETTINGS_UPDATED'
   | 'RECOGNITION_FEEDBACK_RECORDED'
-  | 'RECOGNITION_INDEX_SYNCED';
+  | 'RECOGNITION_INDEX_SYNCED'
+  | 'SHIFT_OPENED'
+  | 'SHIFT_CLOSED'
+  | 'SHIFT_DISCREPANCY_APPROVED'
+  | 'CASH_MOVEMENT_RECORDED'
+  | 'SHIFT_SETTINGS_UPDATED'
+  | 'RETURN_CREATED'
+  | 'RETURN_INSPECTION_RESOLVED'
+  | 'REFUND_RECORDED'
+  | 'REFUND_STATUS_UPDATED'
+  | 'TRANSACTION_VOIDED';
 
 export interface AuditLog {
   id: string;
@@ -759,7 +800,12 @@ export interface AuditLog {
     | 'transaction'
     | 'receipt'
     | 'settings'
-    | 'recognition';
+    | 'recognition'
+    | 'shift'
+    | 'cash_movement'
+    | 'return'
+    | 'refund'
+    | 'void';
   entityId: string;
   actorUserId?: string | null;
   actor: string;
@@ -972,7 +1018,308 @@ export type PinSensitiveAction =
   | 'price_override'
   | 'void'
   | 'refund'
-  | 'stock_adjustment';
+  | 'stock_adjustment'
+  | 'item_cancel'
+  | 'shift_discrepancy';
+
+export type ShiftStatus = 'OPEN' | 'CLOSED';
+export type ShiftDiscrepancyStatus = 'NONE' | 'MATCHED' | 'PENDING_APPROVAL' | 'APPROVED';
+export type CashMovementType = 'CASH_IN' | 'CASH_OUT' | 'EXPENSE' | 'CASH_REFUND';
+
+export interface CashDenominationCount {
+  denomination: number;
+  label: string;
+  qty: number;
+  subtotal: number;
+}
+
+export interface ShiftSettings {
+  requireOpenShiftForSales: boolean;
+  allowDuplicateOpenShifts: boolean;
+  requireSupervisorApprovalOnDiscrepancy: boolean;
+  discrepancyToleranceRp: number;
+  updatedAt: string;
+}
+
+export interface CashMovement {
+  id: string;
+  shiftId: string;
+  movementNumber: string;
+  type: CashMovementType;
+  amount: number;
+  reason: string;
+  referenceNumber: string;
+  notes: string;
+  actorUserId: string | null;
+  actorName: string;
+  createdAt: string;
+}
+
+export interface ShiftPaymentBreakdown {
+  paymentMethodName: string;
+  paymentType: PaymentMethodType;
+  transactionCount: number;
+  amount: number;
+  tenderedAmount: number;
+  changeAmount: number;
+}
+
+export interface ShiftReconciliationSummary {
+  openingCash: number;
+  cashSales: number;
+  cashReceived: number;
+  cashChangeGiven: number;
+  cashRefunds: number;
+  cashInTotal: number;
+  cashOutTotal: number;
+  expenseTotal: number;
+  cashOutCombined: number;
+  nonCashSales: number;
+  totalSales: number;
+  transactionCount: number;
+  expectedCash: number;
+  actualCash: number | null;
+  difference: number | null;
+}
+
+export interface CashierShift {
+  id: string;
+  shiftNumber: string;
+  status: ShiftStatus;
+  cashierUserId: string;
+  cashierName: string;
+  openedByUserId?: string;
+  openedByName?: string;
+  registerName: string;
+  openingCash: number;
+  openingNotes: string;
+  openedAt: string;
+  closedAt: string | null;
+  closedByUserId: string | null;
+  closedByName: string | null;
+  cashSales: number;
+  cashReceived: number;
+  cashChangeGiven: number;
+  cashRefunds: number;
+  cashInTotal: number;
+  cashOutTotal: number;
+  expenseTotal: number;
+  nonCashSales: number;
+  totalSales: number;
+  transactionCount: number;
+  expectedCash: number;
+  actualCash: number | null;
+  difference: number | null;
+  closingNotes: string;
+  closingDenominations: CashDenominationCount[];
+  discrepancyStatus: ShiftDiscrepancyStatus;
+  approvedByUserId: string | null;
+  approvedByName: string | null;
+  approvedAt: string | null;
+  approvalNotes: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ShiftDetailReport {
+  shift: CashierShift;
+  reconciliation: ShiftReconciliationSummary;
+  paymentBreakdown: ShiftPaymentBreakdown[];
+  cashMovements: CashMovement[];
+  transactions: Transaction[];
+  settings: ShiftSettings;
+}
+
+export interface ShiftListResponse {
+  shifts: CashierShift[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+export type ReturnStockDisposition =
+  | 'SELLABLE'
+  | 'DAMAGED'
+  | 'UNSELLABLE'
+  | 'PENDING_INSPECTION';
+
+export type ReturnDispositionFinal = 'SELLABLE' | 'DAMAGED' | 'UNSELLABLE';
+
+export type ReturnRecordStatus = 'COMPLETED' | 'PENDING_INSPECTION';
+
+export type RefundPaymentType = 'CASH' | 'DEBIT' | 'CREDIT' | 'QRIS' | 'TRANSFER' | 'OTHER';
+
+export type RefundRecordStatus = 'COMPLETED' | 'PENDING' | 'MANUAL_RECORDED' | 'FAILED';
+
+export interface TransactionReturnItem {
+  id: string;
+  returnId: string;
+  transactionId: string;
+  transactionItemId: string;
+  productId: string;
+  sku: string;
+  barcode: string;
+  productName: string;
+  unit: string;
+  qty: number;
+  originalQty: number;
+  unitPrice: number;
+  lineRefundAmount: number;
+  taxRefundAmount: number;
+  totalRefundAmount: number;
+  stockDisposition: ReturnStockDisposition;
+  finalDisposition: ReturnDispositionFinal | null;
+  dispositionResolvedByUserId: string | null;
+  dispositionResolvedByName: string | null;
+  dispositionResolvedAt: string | null;
+  dispositionNotes: string;
+  stockMovementId: string | null;
+  createdAt: string;
+}
+
+export interface TransactionReturn {
+  id: string;
+  returnNumber: string;
+  transactionId: string;
+  invoiceNumber: string;
+  receiptNumber: string;
+  returnType: 'PARTIAL' | 'FULL';
+  status: ReturnRecordStatus;
+  reason: string;
+  notes: string;
+  subtotalRefunded: number;
+  discountAdjusted: number;
+  taxRefunded: number;
+  totalRefundAmount: number;
+  loyaltyPointsReversed: number;
+  refundMethod: string;
+  refundPaymentType: RefundPaymentType;
+  refundReference: string;
+  refundStatus: RefundRecordStatus;
+  cashMovementId: string | null;
+  shiftId: string | null;
+  requestedByUserId: string | null;
+  requestedByName: string;
+  approvedByUserId: string | null;
+  approvedByName: string;
+  items: TransactionReturnItem[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TransactionVoidRecord {
+  id: string;
+  voidNumber: string;
+  transactionId: string;
+  invoiceNumber: string;
+  receiptNumber: string;
+  reason: string;
+  notes: string;
+  voidedTotal: number;
+  refundMethod: string;
+  refundPaymentType: RefundPaymentType;
+  refundReference: string;
+  refundStatus: RefundRecordStatus;
+  stockRestoredQty: number;
+  loyaltyPointsReversed: number;
+  cashMovementId: string | null;
+  shiftId: string | null;
+  requestedByUserId: string | null;
+  requestedByName: string;
+  approvedByUserId: string | null;
+  approvedByName: string;
+  createdAt: string;
+}
+
+export interface RefundRecord {
+  id: string;
+  refundNumber: string;
+  sourceType: 'RETURN' | 'VOID';
+  sourceId: string;
+  sourceNumber: string;
+  transactionId: string;
+  invoiceNumber: string;
+  amount: number;
+  refundMethod: string;
+  paymentType: RefundPaymentType;
+  referenceNumber: string;
+  status: RefundRecordStatus;
+  notes: string;
+  cashMovementId: string | null;
+  shiftId: string | null;
+  actorUserId: string | null;
+  actorName: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReturnEligibleItemInfo {
+  transactionItemId: string;
+  productId: string;
+  sku: string;
+  barcode: string;
+  name: string;
+  unit: string;
+  originalQty: number;
+  returnedQty: number;
+  remainingQty: number;
+  unitPrice: number;
+  lineSubtotalPaid: number;
+  lineTaxPaid: number;
+  lineTotalPaid: number;
+  alreadyRefundedAmount: number;
+  remainingRefundableAmount: number;
+  effectiveUnitRefund: number;
+}
+
+export interface ReturnEligibilityDetail {
+  transaction: Transaction;
+  receiptNumber: string;
+  receiptSnapshot: ReceiptSnapshot | null;
+  items: ReturnEligibleItemInfo[];
+  existingReturns: TransactionReturn[];
+  voidRecord: TransactionVoidRecord | null;
+  canReturn: boolean;
+  canReturnReason?: string;
+  canVoid: boolean;
+  canVoidReason?: string;
+  remainingRefundableTotal: number;
+}
+
+export interface ReturnCalculationPreview {
+  transactionId: string;
+  invoiceNumber: string;
+  returnType: 'PARTIAL' | 'FULL';
+  items: Array<{
+    transactionItemId: string;
+    productId: string;
+    name: string;
+    unit: string;
+    qty: number;
+    maxReturnableQty: number;
+    unitPrice: number;
+    lineRefundAmount: number;
+    taxRefundAmount: number;
+    totalRefundAmount: number;
+    stockDisposition: ReturnStockDisposition;
+  }>;
+  subtotalRefunded: number;
+  taxRefunded: number;
+  totalRefundAmount: number;
+  maxRefundableRemaining: number;
+  estimatedLoyaltyPointsReversed: number;
+}
+
+export interface ReturnVoidSummaryStats {
+  totalReturns: number;
+  totalVoided: number;
+  totalRefundAmount: number;
+  cashRefundTotal: number;
+  nonCashRefundTotal: number;
+  pendingInspectionCount: number;
+  pendingRefundCount: number;
+}
 
 export interface StoreData {
   products: Product[];
@@ -988,4 +1335,6 @@ export interface StoreData {
   stockMovements: StockMovement[];
   settings: StoreSettings;
   auditLogs: AuditLog[];
+  currentShift?: CashierShift | null;
+  shiftSettings?: ShiftSettings;
 }

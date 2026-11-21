@@ -9,6 +9,10 @@ Database menggunakan SQLite relasional (`node:sqlite` `DatabaseSync`) dengan mig
 6. `006_inventory_stock_control.sql` — Kontrol stok (`stock_receivings`, `stock_adjustments`, `stock_opnames`, `stock_opname_items`), pelacakan aktor/biaya/alasan pada `stock_movements` dengan `ON DELETE RESTRICT`, serta pengaturan `allow_negative_stock` pada `store_settings`.
 7. `007_ai_product_recognition.sql` — Vektor embedding gambar referensi produk (`product_image_embeddings`), pengaturan ambang batas & provider AI (`recognition_settings`), dan log pengenalan serta umpan balik terverifikasi (`recognition_logs`).
 8. `008_customer_promotion.sql` — Nomor keanggotaan & poin loyalitas pelanggan (`loyalty_settings`, `loyalty_point_transactions`), mesin promosi & target (`promotions`, `promotion_targets`), kebijakan stacking/diskon pada `store_settings`, serta jejak promo & loyalitas pada `transactions` & `transaction_items`.
+9. `009_loyalty_disable_earn_on_redeem.sql` — Menambahkan opsi `disable_earn_on_redeem` pada `loyalty_settings`.
+10. `010_pin_item_cancel_constraint.sql` — Memperluas `CHECK` constraint `pin_authorizations.action` untuk `item_cancel` (`pos:item_cancel`).
+11. `011_shift_cash_management.sql` — Manajemen shift & kas kasir (`shift_settings`, `cashier_shifts`, `cash_movements`), kolom `transactions.shift_id`, serta dukungan `shift_discrepancy` pada `pin_authorizations`.
+12. `012_return_refund_void.sql` — Retur, refund & void transaksi (`transaction_returns`, `transaction_return_items`, `transaction_voids`, `refund_records`), perluasan status `VOIDED`/`REFUNDED`/`PARTIALLY_REFUNDED` pada `transactions`, serta tipe mutasi `RETURN_IN`/`VOID_IN` pada `stock_movements`.
 
 ---
 
@@ -41,6 +45,10 @@ erDiagram
     products ||--o{ stock_opname_items : counted_in
 
     customers ||--o{ transactions : places
+    users ||--o{ cashier_shifts : operates
+    cashier_shifts ||--o{ transactions : settles
+    cashier_shifts ||--o{ cash_movements : records_cash
+    users ||--o{ cash_movements : performs
     customers ||--o{ loyalty_point_transactions : tracks_points
     transactions ||--o{ loyalty_point_transactions : triggers
     promotions ||--o{ promotion_targets : targets
@@ -50,6 +58,11 @@ erDiagram
     payment_methods ||--o{ transaction_payments : via
     transactions ||--|| receipt_snapshots : freezes
     transactions ||--o{ receipt_print_logs : records_prints
+    transactions ||--o{ transaction_returns : has_returns
+    transaction_returns ||--o{ transaction_return_items : contains
+    transaction_items ||--o{ transaction_return_items : returned_in
+    transactions ||--o| transaction_voids : voided_by
+    transactions ||--o{ refund_records : refunded_via
 ```
 
 ---
@@ -111,7 +124,20 @@ erDiagram
 - **`promotions`**: `id (PK)`, `code (UNIQUE NOCASE)`, `name`, `description`, `promo_type` (`PERCENT` | `FIXED_AMOUNT` | `SPECIAL_PRICE` | `BUY_X_GET_Y` | `BUNDLE`), `scope` (`PRODUCT` | `TRANSACTION` | `CATEGORY` | `BUNDLE`), `discount_value`, `max_discount_amount`, `min_purchase_amount`, `min_qty`, `start_date`, `end_date`, `status` (`ACTIVE` | `INACTIVE`), `stackable`, `priority`, `rule_json`, `usage_count`, `created_by_user_id`, `created_by_name`, `created_at`, `updated_at`. Indexes: `idx_promotions_status_dates`, `idx_promotions_code`.
 - **`promotion_targets`**: `id (PK)`, `promotion_id (FK -> promotions ON DELETE CASCADE)`, `target_type` (`PRODUCT` | `CATEGORY`), `target_id`, `required_qty`. Index: `idx_promotion_targets_promo`.
 - **Ekstensi `store_settings`**: `allow_promo_stacking`, `allow_manual_with_promo`, `max_cashier_discount_percent`, `max_authorized_discount_percent`.
-- **Ekstensi `transactions` & `transaction_items`**: `promotion_discount_amount`, `loyalty_points_earned`, `loyalty_points_redeemed`, `loyalty_discount_amount`, `applied_promotions_json` pada `transactions`; serta `promotion_id`, `promotion_name`, `promotion_discount_amount` pada `transaction_items`.
+- **Ekstensi `transactions` & `transaction_items`**: `promotion_discount_amount`, `loyalty_points_earned`, `loyalty_points_redeemed`, `loyalty_discount_amount`, `applied_promotions_json`, `shift_id (FK -> cashier_shifts ON DELETE SET NULL)` pada `transactions`; serta `promotion_id`, `promotion_name`, `promotion_discount_amount` pada `transaction_items`.
 
+### 8. Modul Shift & Kas Kasir (`011_shift_cash_management.sql`)
+- **`shift_settings`**: `id (PK=1)`, `require_open_shift_for_sales`, `allow_duplicate_open_shifts`, `require_supervisor_approval_on_discrepancy`, `discrepancy_tolerance_rp`, `updated_at`.
+- **`cashier_shifts`**: `id (PK)`, `shift_number (UNIQUE)`, `status` (`OPEN` | `CLOSED`), `cashier_user_id (FK -> users ON DELETE RESTRICT)`, `cashier_name`, `register_name`, `opening_cash`, `opening_notes`, `opened_at`, `closed_at`, `closed_by_user_id`, `closed_by_name`, `cash_sales`, `cash_received`, `cash_change_given`, `cash_refunds`, `cash_in_total`, `cash_out_total`, `expense_total`, `non_cash_sales`, `total_sales`, `transaction_count`, `expected_cash`, `actual_cash`, `difference`, `closing_notes`, `closing_denominations_json`, `discrepancy_status` (`NONE` | `MATCHED` | `PENDING_APPROVAL` | `APPROVED`), `approved_by_user_id`, `approved_by_name`, `approved_at`, `approval_notes`, `created_at`, `updated_at`.
+  - Indexes: `idx_cashier_shifts_user_status`, `idx_cashier_shifts_opened_at`, `idx_cashier_shifts_discrepancy`.
+- **`cash_movements`**: `id (PK)`, `shift_id (FK -> cashier_shifts ON DELETE CASCADE)`, `movement_number (UNIQUE)`, `type` (`CASH_IN` | `CASH_OUT` | `EXPENSE` | `CASH_REFUND`), `amount`, `reason`, `reference_number`, `notes`, `actor_user_id (FK -> users ON DELETE SET NULL)`, `actor_name`, `created_at`.
+  - Index: `idx_cash_movements_shift`.
 
+### 9. Modul Retur, Refund & Void (`012_return_refund_void.sql`)
+- **Ekstensi `transactions`**: Status ditambah `'VOIDED'`, `payment_status` ditambah `'PARTIALLY_REFUNDED' | 'REFUNDED'`, plus `return_status` (`'NONE' | 'PARTIAL' | 'FULL'`), `returned_total`, `refunded_total`, `void_number`, `void_reason`, `voided_at`, `voided_by_user_id`, `voided_by_name`, `void_approved_by_user_id`, `void_approved_by_name` (`idx_transactions_return_status`).
+- **Ekstensi `stock_movements`**: Menambahkan `'RETURN_IN'` dan `'VOID_IN'` pada `CHECK` constraint `type`.
+- **`transaction_returns`**: `id (PK)`, `return_number (UNIQUE)`, `transaction_id (FK -> transactions ON DELETE RESTRICT)`, `invoice_number`, `receipt_number`, `return_type` (`PARTIAL` | `FULL`), `status` (`COMPLETED` | `PENDING_INSPECTION`), `reason`, `notes`, `subtotal_refunded`, `discount_adjusted`, `tax_refunded`, `total_refund_amount`, `loyalty_points_reversed`, `refund_method`, `refund_payment_type`, `refund_reference`, `refund_status`, `cash_movement_id`, `shift_id`, `idempotency_key (UNIQUE)`, `requested_by_user_id`, `requested_by_name`, `approved_by_user_id`, `approved_by_name`, `created_at`, `updated_at`. Indexes: `idx_transaction_returns_trx`, `idx_transaction_returns_created_at`.
+- **`transaction_return_items`**: `id (PK)`, `return_id (FK -> transaction_returns ON DELETE CASCADE)`, `transaction_id (FK -> transactions ON DELETE RESTRICT)`, `transaction_item_id (FK -> transaction_items ON DELETE RESTRICT)`, `product_id (FK -> products ON DELETE RESTRICT)`, `sku`, `barcode`, `product_name`, `unit`, `qty`, `original_qty`, `unit_price`, `line_refund_amount`, `tax_refund_amount`, `total_refund_amount`, `stock_disposition` (`SELLABLE` | `DAMAGED` | `UNSELLABLE` | `PENDING_INSPECTION`), `final_disposition` (`SELLABLE` | `DAMAGED` | `UNSELLABLE` | `NULL`), `disposition_resolved_by_user_id`, `disposition_resolved_by_name`, `disposition_resolved_at`, `disposition_notes`, `stock_movement_id`, `created_at`. Indexes: `idx_return_items_return`, `idx_return_items_trx_item`, `idx_return_items_disposition`.
+- **`transaction_voids`**: `id (PK)`, `void_number (UNIQUE)`, `transaction_id (UNIQUE FK -> transactions ON DELETE RESTRICT)`, `invoice_number`, `receipt_number`, `reason`, `notes`, `voided_total`, `refund_method`, `refund_payment_type`, `refund_reference`, `refund_status`, `stock_restored_qty`, `loyalty_points_reversed`, `cash_movement_id`, `shift_id`, `requested_by_user_id`, `requested_by_name`, `approved_by_user_id`, `approved_by_name`, `created_at`. Index: `idx_transaction_voids_created_at`.
+- **`refund_records`**: `id (PK)`, `refund_number (UNIQUE)`, `source_type` (`RETURN` | `VOID`), `source_id`, `source_number`, `transaction_id (FK -> transactions ON DELETE RESTRICT)`, `invoice_number`, `amount`, `refund_method`, `payment_type` (`CASH` | `DEBIT` | `CREDIT` | `QRIS` | `TRANSFER` | `OTHER`), `reference_number`, `status` (`COMPLETED` | `PENDING` | `MANUAL_RECORDED` | `FAILED`), `notes`, `cash_movement_id`, `shift_id`, `actor_user_id`, `actor_name`, `created_at`, `updated_at`. Indexes: `idx_refund_records_trx`, `idx_refund_records_source`, `idx_refund_records_created_at`.
 

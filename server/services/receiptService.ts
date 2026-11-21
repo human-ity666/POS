@@ -217,10 +217,10 @@ export function getReceiptData(
   options: { publicToken?: string; originUrl?: string } = {}
 ): ReceiptData {
   const transaction = getTransactionById(transactionIdOrInvoice);
-  if (transaction.status !== 'COMPLETED') {
+  if (transaction.status !== 'COMPLETED' && transaction.status !== 'VOIDED') {
     throw new ServiceError(
       409,
-      `Struk resmi hanya tersedia untuk transaksi selesai (status saat ini: ${transaction.status}).`
+      `Struk resmi hanya tersedia untuk transaksi selesai atau di-void (status saat ini: ${transaction.status}).`
     );
   }
 
@@ -268,10 +268,10 @@ export function recordReceiptPrint(
   originUrl?: string
 ): { receipt: ReceiptData; printLog: ReceiptPrintLog } {
   const transaction = getTransactionById(transactionIdOrInvoice);
-  if (transaction.status !== 'COMPLETED') {
+  if (transaction.status !== 'COMPLETED' && transaction.status !== 'VOIDED') {
     throw new ServiceError(
       409,
-      'Hanya transaksi yang sudah selesai (COMPLETED) yang dapat dicetak atau dicetak ulang.'
+      'Hanya transaksi yang sudah selesai (COMPLETED) atau di-void (VOIDED) yang dapat dicetak atau dicetak ulang.'
     );
   }
 

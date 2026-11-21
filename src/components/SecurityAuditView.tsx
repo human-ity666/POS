@@ -61,7 +61,19 @@ export function SecurityAuditView({
   const filteredAudit = useMemo(() => {
     const q = auditSearch.trim().toLowerCase();
     return auditLogs.filter((log) => {
-      if (actionFilter !== 'ALL' && !log.action.startsWith(actionFilter)) return false;
+      if (actionFilter === 'SHIFT') {
+        if (!log.action.startsWith('SHIFT_') && !log.action.startsWith('CASH_')) return false;
+      } else if (actionFilter === 'RETURN_VOID') {
+        if (
+          !log.action.startsWith('RETURN_') &&
+          !log.action.startsWith('REFUND_') &&
+          log.action !== 'TRANSACTION_VOIDED'
+        ) {
+          return false;
+        }
+      } else if (actionFilter !== 'ALL' && !log.action.startsWith(actionFilter)) {
+        return false;
+      }
       if (!q) return true;
       return (
         log.summary.toLowerCase().includes(q) ||
@@ -244,6 +256,8 @@ export function SecurityAuditView({
                   { id: 'PIN', label: 'Otorisasi PIN' },
                   { id: 'PRODUCT', label: 'Produk & Katalog' },
                   { id: 'TRANSACTION', label: 'Transaksi' },
+                  { id: 'RETURN_VOID', label: 'Retur & Void' },
+                  { id: 'SHIFT', label: 'Shift & Kas' },
                   { id: 'STOCK', label: 'Stok' },
                 ] as const
               ).map((f) => (

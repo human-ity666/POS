@@ -10,6 +10,7 @@ import {
   Minimize2,
   ReceiptText,
   RefreshCw,
+  RotateCcw,
   ScanBarcode,
   Settings,
   Shield,
@@ -17,13 +18,16 @@ import {
   User,
   UserCheck,
   Users,
+  Wallet,
   X,
 } from 'lucide-react';
 import type {
+  CashierShift,
   Customer,
   DiscountMode,
   PinSensitiveAction,
   Product,
+  ShiftSettings,
   StockMovementType,
   StoreData,
   StoreSettings,
@@ -48,9 +52,11 @@ import { ProfileModal } from './components/ProfileModal';
 import { PromotionsView } from './components/PromotionsView';
 import { ReceiptDetailView } from './components/ReceiptDetailView';
 import { ReceiptModal } from './components/ReceiptModal';
+import { ReturnVoidView } from './components/ReturnVoidView';
 import { RolesPermissionsView } from './components/RolesPermissionsView';
 import { SecurityAuditView } from './components/SecurityAuditView';
 import { SettingsModal } from './components/SettingsModal';
+import { ShiftView } from './components/ShiftView';
 import { StockCardModal } from './components/StockCardModal';
 import { StockControlView } from './components/StockControlView';
 import { StockReportView } from './components/StockReportView';
@@ -60,10 +66,12 @@ import { UsersView } from './components/UsersView';
 
 type AppTab =
   | 'cashier'
+  | 'shifts'
   | 'reports'
   | 'stock'
   | 'inventory'
   | 'transactions'
+  | 'returns'
   | 'customers'
   | 'promotions'
   | 'users'
@@ -79,10 +87,22 @@ interface NavDefinition {
 
 const NAV_ITEMS: NavDefinition[] = [
   { id: 'cashier', label: 'Kasir & Scan Kamera', icon: ScanBarcode, requiredAnyPermissions: ['pos:view'] },
+  {
+    id: 'shifts',
+    label: 'Buka/Tutup Toko & Kas',
+    icon: Wallet,
+    requiredAnyPermissions: ['shifts:view', 'shifts:open', 'shifts:close', 'shifts:cash_movement', 'shifts:approve', 'shifts:manage'],
+  },
   { id: 'reports', label: 'Laporan Stok Otomatis', icon: BarChart3, requiredAnyPermissions: ['reports:view', 'stock:view'] },
   { id: 'stock', label: 'Kontrol & Opname Stok', icon: ClipboardCheck, requiredAnyPermissions: ['stock:view', 'reports:view'] },
   { id: 'inventory', label: 'Produk & Barcode', icon: Boxes, requiredAnyPermissions: ['products:view'] },
   { id: 'transactions', label: 'Riwayat Transaksi', icon: ReceiptText, requiredAnyPermissions: ['transactions:view'] },
+  {
+    id: 'returns',
+    label: 'Retur, Refund & Void',
+    icon: RotateCcw,
+    requiredAnyPermissions: ['pos:refund', 'pos:void', 'transactions:view', 'pos:view'],
+  },
   { id: 'customers', label: 'Pelanggan & Member', icon: UserCheck, requiredAnyPermissions: ['customers:view', 'pos:view'] },
   { id: 'promotions', label: 'Promosi & Loyalitas', icon: Tag, requiredAnyPermissions: ['promotions:view', 'promotions:manage', 'pos:view'] },
   { id: 'users', label: 'Manajemen Pengguna', icon: Users, requiredAnyPermissions: ['users:view'] },
@@ -112,6 +132,7 @@ export default function App() {
   const [adjustingProduct, setAdjustingProduct] = useState<Product | null>(null);
   const [barcodeProduct, setBarcodeProduct] = useState<Product | null>(null);
   const [receiptTransaction, setReceiptTransaction] = useState<Transaction | null>(null);
+  const [selectedReturnTrxId, setSelectedReturnTrxId] = useState<string | null>(null);
   const [activeReceiptId, setActiveReceiptId] = useState<string | null>(null);
   const [detailTransaction, setDetailTransaction] = useState<Transaction | null>(null);
   const [resumedTransaction, setResumedTransaction] = useState<Transaction | null>(null);
@@ -547,6 +568,69 @@ export default function App() {
     });
   };
 
+  const requestCancelItemPin = (opts: { title: string; description: string }): Promise<string> => {
+    return new Promise<string>((resolve, reject) => {
+      setPinRequest({
+        action: 'item_cancel',
+        title: opts.title,
+        description: opts.description,
+        onTokenReady: async (token) => {
+          resolve(token);
+        },
+        onCancel: () => reject(new Error('Otorisasi PIN Batalkan Item dibatalkan.')),
+      });
+    });
+  };
+
+  const requestSupervisorShiftPin = (opts: { title: string; description: string }): Promise<string> => {
+    return new Promise<string>((resolve, reject) => {
+      setPinRequest({
+        action: 'shift_discrepancy',
+        title: opts.title,
+        description: opts.description,
+        onTokenReady: async (token) => {
+          resolve(token);
+        },
+        onCancel: () => reject(new Error('Otorisasi PIN persetujuan selisih shift dibatalkan.')),
+      });
+    });
+  };
+
+  const requestRefundPin = (opts: { title: string; description: string }): Promise<string> => {
+    return new Promise<string>((resolve, reject) => {
+      setPinRequest({
+        action: 'refund',
+        title: opts.title,
+        description: opts.description,
+        onTokenReady: async (token) => {
+          resolve(token);
+        },
+        onCancel: () => reject(new Error('Otorisasi PIN persetujuan retur/refund dibatalkan.')),
+      });
+    });
+  };
+
+  const requestVoidPin = (opts: { title: string; description: string }): Promise<string> => {
+    return new Promise<string>((resolve, reject) => {
+      setPinRequest({
+        action: 'void',
+        title: opts.title,
+        description: opts.description,
+        onTokenReady: async (token) => {
+          resolve(token);
+        },
+        onCancel: () => reject(new Error('Otorisasi PIN persetujuan void transaksi dibatalkan.')),
+      });
+    });
+  };
+
+  const openReturnVoidForTransaction = (trx: Transaction) => {
+    setDetailTransaction(null);
+    setActiveReceiptId(null);
+    setSelectedReturnTrxId(trx.id);
+    setActiveTab('returns');
+  };
+
   if (publicReceiptParams) {
     return (
       <div className="min-h-screen bg-slate-50 text-slate-900">
@@ -607,6 +691,11 @@ export default function App() {
   const canHoldTransaction = currentUser.permissions.includes('pos:hold');
   const canResumeTransaction = currentUser.permissions.includes('pos:resume');
   const canCancelTransaction = currentUser.permissions.includes('pos:cancel');
+  const canCancelCartItem = currentUser.permissions.includes('pos:item_cancel');
+  const canRefundReturn = currentUser.permissions.includes('pos:refund');
+  const canVoidTransaction = currentUser.permissions.includes('pos:void');
+  const canReturnVoid = canRefundReturn || canVoidTransaction;
+  const canOpenShift = currentUser.permissions.includes('shifts:open');
   const canEditSettings = currentUser.permissions.includes('settings:edit');
   const canCreateCustomer =
     currentUser.permissions.includes('customers:create') ||
@@ -618,6 +707,15 @@ export default function App() {
     currentUser.permissions.includes('pos:view');
   const canManageAiRecognition =
     currentUser.permissions.includes('recognition:manage') || canEditSettings;
+
+  const resolvedShiftSettings: ShiftSettings = storeData?.shiftSettings ?? {
+    requireOpenShiftForSales: true,
+    allowDuplicateOpenShifts: false,
+    requireSupervisorApprovalOnDiscrepancy: true,
+    discrepancyToleranceRp: 0,
+    updatedAt: '',
+  };
+  const activeCashierShift: CashierShift | null = storeData?.currentShift ?? null;
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex">
@@ -902,6 +1000,13 @@ export default function App() {
                       heldTransactions={storeData.heldTransactions ?? []}
                       settings={storeData.settings}
                       loyaltySettings={storeData.loyaltySettings}
+                      currentShift={activeCashierShift}
+                      shiftSettings={resolvedShiftSettings}
+                      canOpenShift={canOpenShift}
+                      onOpenShiftScreen={() => {
+                        setActiveReceiptId(null);
+                        setActiveTab('shifts');
+                      }}
                       canCreateProduct={canCreateProduct}
                       canCreateCustomer={canCreateCustomer}
                       canApproveDiscount={canApproveDiscount}
@@ -909,6 +1014,7 @@ export default function App() {
                       canHold={canHoldTransaction}
                       canResume={canResumeTransaction}
                       canCancel={canCancelTransaction}
+                      canCancelItem={canCancelCartItem}
                       canUseAiRecognition={canUseAiRecognition}
                       canManageAiRecognition={canManageAiRecognition}
                       canEditProduct={canEditProduct}
@@ -918,6 +1024,7 @@ export default function App() {
                       onHoldTransaction={handleHoldTransaction}
                       onResumeHeldTransaction={handleResumeHeldTransaction}
                       onCancelTransaction={handleCancelTransaction}
+                      onRequestCancelItemPin={requestCancelItemPin}
                       onCreateCustomer={handleCreateCustomer}
                       onOpenNewProductWithBarcode={(code) => {
                         setEditingProduct(null);
@@ -932,6 +1039,17 @@ export default function App() {
                         setProductModalOpen(true);
                       }}
                       onStoreUpdate={setStoreData}
+                    />
+                  )}
+
+                  {activeTab === 'shifts' && (
+                    <ShiftView
+                      currentUser={currentUser}
+                      currentShift={activeCashierShift}
+                      shiftSettings={resolvedShiftSettings}
+                      storeSettings={storeData.settings}
+                      onStoreUpdate={setStoreData}
+                      onRequestSupervisorPin={requestSupervisorShiftPin}
                     />
                   )}
 
@@ -995,9 +1113,24 @@ export default function App() {
                       transactions={storeData.transactions}
                       heldTransactions={storeData.heldTransactions ?? []}
                       paymentMethods={storeData.paymentMethods ?? []}
+                      canReturnVoid={canReturnVoid}
                       onViewReceipt={(trx) => setReceiptTransaction(trx)}
                       onOpenReceiptDetail={(trx) => setActiveReceiptId(trx.id)}
                       onViewDetail={(trx) => setDetailTransaction(trx)}
+                      onOpenReturnVoid={openReturnVoidForTransaction}
+                    />
+                  )}
+
+                  {activeTab === 'returns' && (
+                    <ReturnVoidView
+                      currentUser={currentUser}
+                      paymentMethods={storeData.paymentMethods ?? []}
+                      initialTransactionId={selectedReturnTrxId}
+                      onClearInitialTransaction={() => setSelectedReturnTrxId(null)}
+                      onStoreUpdate={setStoreData}
+                      onViewReceipt={(trx) => setReceiptTransaction(trx)}
+                      onRequestRefundPin={requestRefundPin}
+                      onRequestVoidPin={requestVoidPin}
                     />
                   )}
 
@@ -1097,6 +1230,7 @@ export default function App() {
 
       <TransactionDetailModal
         transaction={detailTransaction}
+        canReturnVoid={canReturnVoid}
         onClose={() => setDetailTransaction(null)}
         onPrintReceipt={(trx) => {
           setDetailTransaction(null);
@@ -1106,6 +1240,7 @@ export default function App() {
           setDetailTransaction(null);
           setActiveReceiptId(trx.id);
         }}
+        onOpenReturnVoid={openReturnVoidForTransaction}
         onResumeHeld={
           canResumeTransaction
             ? async (trx) => {

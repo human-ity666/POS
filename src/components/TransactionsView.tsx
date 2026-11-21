@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Calendar, Download, Eye, Printer, Receipt, Search } from 'lucide-react';
+import { Calendar, Download, Eye, Printer, Receipt, RotateCcw, Search } from 'lucide-react';
 import type { PaymentMethodConfig, Transaction, TransactionStatus } from '../types';
 import { downloadCSV, formatDateTime, formatRupiah } from '../utils/format';
 
@@ -7,9 +7,11 @@ interface TransactionsViewProps {
   transactions: Transaction[];
   heldTransactions: Transaction[];
   paymentMethods: PaymentMethodConfig[];
+  canReturnVoid?: boolean;
   onViewReceipt: (transaction: Transaction) => void;
   onOpenReceiptDetail?: (transaction: Transaction) => void;
   onViewDetail: (transaction: Transaction) => void;
+  onOpenReturnVoid?: (transaction: Transaction) => void;
 }
 
 const STATUS_META: Record<TransactionStatus, { label: string; cls: string }> = {
@@ -18,15 +20,18 @@ const STATUS_META: Record<TransactionStatus, { label: string; cls: string }> = {
   HELD: { label: 'DITAHAN', cls: 'text-amber-700' },
   CANCELLED: { label: 'DIBATALKAN', cls: 'text-rose-700' },
   COMPLETED: { label: 'SELESAI', cls: 'text-emerald-700' },
+  VOIDED: { label: 'DI-VOID', cls: 'text-rose-700' },
 };
 
 export function TransactionsView({
   transactions,
   heldTransactions,
   paymentMethods,
+  canReturnVoid = true,
   onViewReceipt,
   onOpenReceiptDetail,
   onViewDetail,
+  onOpenReturnVoid,
 }: TransactionsViewProps) {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<'ALL' | TransactionStatus>('ALL');
@@ -182,6 +187,7 @@ export function TransactionsView({
             >
               <option value="ALL">Semua Status</option>
               <option value="COMPLETED">Selesai</option>
+              <option value="VOIDED">Di-Void</option>
               <option value="HELD">Ditahan (Hold)</option>
               <option value="IN_PROGRESS">Berjalan</option>
               <option value="CANCELLED">Dibatalkan</option>
@@ -249,6 +255,12 @@ export function TransactionsView({
                         <p className={`text-[11px] font-bold mt-0.5 ${meta.cls}`}>
                           {meta.label} · {trx.paymentStatus}
                         </p>
+                        {trx.returnStatus && trx.returnStatus !== 'NONE' && trx.status === 'COMPLETED' && (
+                          <p className="text-[10px] font-semibold text-amber-700 mt-0.5">
+                            {trx.returnStatus === 'FULL' ? 'Retur Penuh' : 'Retur Sebagian'} (
+                            {formatRupiah(trx.refundedTotal ?? 0)})
+                          </p>
+                        )}
                       </td>
                       <td className="py-3 px-4 font-mono text-[11px] text-slate-500 tabular-nums whitespace-nowrap">
                         {formatDateTime(trx.createdAt)}
@@ -281,7 +293,7 @@ export function TransactionsView({
                             <Eye className="w-3 h-3" />
                             Detail
                           </button>
-                          {trx.status === 'COMPLETED' && (
+                          {(trx.status === 'COMPLETED' || trx.status === 'VOIDED') && (
                             <>
                               <button
                                 type="button"
@@ -302,6 +314,22 @@ export function TransactionsView({
                                 </button>
                               )}
                             </>
+                          )}
+                          {trx.status === 'COMPLETED' && onOpenReturnVoid && (
+                            <button
+                              type="button"
+                              disabled={!canReturnVoid}
+                              title={
+                                !canReturnVoid
+                                  ? 'Akun Anda tidak memiliki hak akses Retur / Refund atau Void Transaksi.'
+                                  : undefined
+                              }
+                              onClick={() => onOpenReturnVoid(trx)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 disabled:opacity-40 disabled:cursor-not-allowed rounded-md transition-colors"
+                            >
+                              <RotateCcw className="w-3 h-3" />
+                              Retur / Void
+                            </button>
                           )}
                         </div>
                       </td>
